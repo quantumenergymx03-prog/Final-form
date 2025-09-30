@@ -1099,6 +1099,9 @@ class MainApp:
         self.bearing_file_picker = ft.FilePicker(on_result=self._bearing_csv_pick_result)
         self.page.overlay.append(self.bearing_file_picker)
 
+        # Mensaje contextual cuando la órbita no puede graficarse por falta de datos
+        self._orbit_last_warning: Optional[str] = None
+
 
 
         self.clock_text = ft.Text(self._get_current_time(), size=14, weight="w500")
@@ -2541,6 +2544,8 @@ class MainApp:
                     orbit_enabled = bool(getattr(self.orbit_cb, 'value', False))
                 else:
                     orbit_enabled = bool(getattr(self, 'orbit_plot_enabled', False))
+                if not orbit_enabled:
+                    self._orbit_last_warning = None
                 if orbit_enabled:
                     x_col = getattr(self, 'orbit_x_dd', None).value if getattr(self, 'orbit_x_dd', None) else self.orbit_axis_x_pref
                     y_col = getattr(self, 'orbit_y_dd', None).value if getattr(self, 'orbit_y_dd', None) else self.orbit_axis_y_pref
@@ -4965,6 +4970,42 @@ class MainApp:
         except Exception:
             return None
 
+    def _estimate_dt_seconds(self, t_values: np.ndarray) -> Optional[float]:
+        try:
+            diffs = np.diff(np.asarray(t_values, dtype=float))
+            if diffs.size == 0:
+                return None
+            diffs = diffs[np.isfinite(diffs)]
+            if diffs.size == 0:
+                return None
+            dt_val = float(np.median(diffs))
+            if dt_val > 0:
+                return dt_val
+        except Exception:
+            return None
+        return None
+
+    def _set_orbit_warning(self, min_samples: int, dt: Optional[float], actual_samples: int) -> None:
+        try:
+            min_samples = int(max(0, min_samples))
+            actual_samples = int(max(0, actual_samples))
+            if dt and dt > 0:
+                min_seconds = max(0.0, (min_samples - 1) * dt) if min_samples > 1 else dt
+                actual_seconds = max(0.0, (actual_samples - 1) * dt) if actual_samples > 1 else 0.0
+                msg = (
+                    f"La órbita requiere al menos {min_samples} muestras válidas (~{min_seconds:.2f} s) "
+                    f"pero la selección actual solo aporta {actual_samples} (~{actual_seconds:.2f} s)."
+                )
+            else:
+                msg = (
+                    f"La órbita requiere al menos {min_samples} muestras válidas, "
+                    f"pero la selección actual solo aporta {actual_samples}."
+                )
+            msg += " Amplía la ventana de muestreo o usa un registro más largo."
+            self._orbit_last_warning = msg
+        except Exception:
+            self._orbit_last_warning = None
+
     def _generate_orbit_figure(
         self,
         t_segment: np.ndarray,
@@ -4978,25 +5019,23 @@ class MainApp:
         dark_mode: bool,
     ):
         try:
+            self._orbit_last_warning = None
             t = np.asarray(t_segment, dtype=float).ravel()
             x = np.asarray(x_segment, dtype=float).ravel()
             y = np.asarray(y_segment, dtype=float).ravel()
             if t.size < 32 or x.size != t.size or y.size != t.size:
+                dt_est = self._estimate_dt_seconds(t)
+                self._set_orbit_warning(32, dt_est, int(min(t.size, x.size, y.size)))
                 return None
             valid = np.isfinite(t) & np.isfinite(x) & np.isfinite(y)
             if np.count_nonzero(valid) < 32:
+                dt_est = self._estimate_dt_seconds(t[valid])
+                self._set_orbit_warning(32, dt_est, int(np.count_nonzero(valid)))
                 return None
             t = t[valid]
             x = x[valid]
             y = y[valid]
-            dt = None
-            if t.size > 1:
-                try:
-                    dt_val = float(np.median(np.diff(t)))
-                    if np.isfinite(dt_val) and dt_val > 0:
-                        dt = dt_val
-                except Exception:
-                    dt = None
+            dt = self._estimate_dt_seconds(t)
 
             def _band_filter(arr: np.ndarray) -> np.ndarray:
                 base = np.asarray(arr, dtype=float)
@@ -5019,7 +5058,9 @@ class MainApp:
             x_filt = _band_filter(x)
             y_filt = _band_filter(y)
             finite = np.isfinite(x_filt) & np.isfinite(y_filt)
-            if np.count_nonzero(finite) < 16:
+            finite_count = int(np.count_nonzero(finite))
+            if finite_count < 16:
+                self._set_orbit_warning(16, dt, finite_count)
                 return None
             x_filt = x_filt[finite]
             y_filt = y_filt[finite]
@@ -5028,6 +5069,7 @@ class MainApp:
                 x_filt = x_filt[idx]
                 y_filt = y_filt[idx]
             if x_filt.size < 16 or y_filt.size < 16:
+                self._set_orbit_warning(16, dt, int(min(x_filt.size, y_filt.size)))
                 return None
             stack = np.vstack((x_filt, y_filt))
             radial_source = np.hypot(x_filt, y_filt)
@@ -5210,6 +5252,8 @@ class MainApp:
             fig.subplots_adjust(left=0.12, right=0.88, top=0.92, bottom=0.12)
             return fig
         except Exception:
+            if self._orbit_last_warning is None:
+                self._orbit_last_warning = "No se pudo generar la órbita con los datos actuales."
             return None
 
     def _format_fft_zoom_label(self, start: float, end: float, full_range: Tuple[float, float]) -> str:
@@ -6285,12 +6329,15 @@ class MainApp:
                 env_chart = None
 
             orbit_chart = None
+            orbit_warning_ctrl = None
             try:
                 orbit_enabled = False
                 if getattr(self, 'orbit_cb', None):
                     orbit_enabled = bool(getattr(self.orbit_cb, 'value', False))
                 else:
                     orbit_enabled = bool(getattr(self, 'orbit_plot_enabled', False))
+                if not orbit_enabled:
+                    self._orbit_last_warning = None
                 if orbit_enabled:
                     x_col = getattr(self, 'orbit_x_dd', None).value if getattr(self, 'orbit_x_dd', None) else self.orbit_axis_x_pref
                     y_col = getattr(self, 'orbit_y_dd', None).value if getattr(self, 'orbit_y_dd', None) else self.orbit_axis_y_pref
@@ -6312,11 +6359,23 @@ class MainApp:
                             fmax_ui,
                             self.is_dark_mode,
                         )
+                        warning_msg = getattr(self, '_orbit_last_warning', None)
                         if orbit_fig is not None:
                             orbit_chart = MatplotlibChart(orbit_fig, expand=True, isolated=True)
                             plt.close(orbit_fig)
+                        elif warning_msg:
+                            orbit_warning_ctrl = ft.Container(
+                                ft.Text(warning_msg, size=12, color="#e67e22"),
+                                padding=ft.padding.only(left=4, right=4, top=2, bottom=2),
+                                border=ft.border.all(1, color="#e67e22"),
+                                border_radius=6,
+                                bgcolor=ft.Colors.with_opacity(0.06, "#e67e22"),
+                            )
+                        else:
+                            self._orbit_last_warning = None
             except Exception:
                 orbit_chart = None
+                orbit_warning_ctrl = None
 
             runup_chart = None
             try:
@@ -6477,6 +6536,7 @@ class MainApp:
                 ]
                     + ([runup_chart] if runup_chart else [])
                     + ([orbit_chart] if orbit_chart else [])
+                    + ([orbit_warning_ctrl] if orbit_warning_ctrl else [])
                     + ([env_chart] if 'env_chart' in locals() and env_chart else [])
                     + aux_plots,
                 spacing=20,
