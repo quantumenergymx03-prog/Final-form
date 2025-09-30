@@ -5081,7 +5081,7 @@ class MainApp:
                 overlay_original = True
                 balance_note = "Órbita auto-equilibrada (señales muy correlacionadas)"
             face = "#0f141b" if dark_mode else "white"
-            fig, ax = plt.subplots(figsize=(6, 6))
+            fig, ax = plt.subplots(figsize=(6, 6), constrained_layout=False)
             fig.patch.set_facecolor(face)
             ax.set_facecolor(face)
             accent = self._accent_ui()
@@ -5205,7 +5205,9 @@ class MainApp:
             handles, labels = ax.get_legend_handles_labels()
             if handles:
                 ax.legend(loc="upper right", fontsize=8)
-            fig.tight_layout()
+            # Ajustes manuales de los márgenes para evitar que tight_layout colapse el eje
+            # cuando hay elementos adicionales como la barra de color o la leyenda.
+            fig.subplots_adjust(left=0.12, right=0.88, top=0.92, bottom=0.12)
             return fig
         except Exception:
             return None
