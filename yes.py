@@ -1270,10 +1270,13 @@ class MainApp:
             pass
 
     def _on_config_tab_change(self, e: ft.ControlEvent):
+        key = None
         try:
             tabs_control = e.control
-            selected_tab = tabs_control.tabs[tabs_control.selected_index]
-            key = getattr(selected_tab, "data", None)
+            selected_index = getattr(tabs_control, "selected_index", 0) or 0
+            keys = getattr(self, "config_tab_keys", []) or []
+            if 0 <= selected_index < len(keys):
+                key = keys[selected_index]
         except Exception:
             key = None
         if not key:
@@ -4584,18 +4587,21 @@ class MainApp:
             "diagnostics": ft.Container(content=diagnosis_settings, padding=10),
         }
 
+        tab_definitions = [
+            ("inputs", "Entradas", ft.Icons.TUNE_ROUNDED),
+            ("signals", "Señales", ft.Icons.SHOW_CHART_ROUNDED),
+            ("spectrum", "Espectro", ft.Icons.GRAPHIC_EQ_ROUNDED),
+            ("diagnostics", "Diagnóstico", ft.Icons.MEDICAL_SERVICES_ROUNDED),
+        ]
+
         self.config_tab_views = config_tab_wrappers
-        self.active_config_tab = "inputs"
+        self.config_tab_keys = [key for key, *_ in tab_definitions]
+        self.active_config_tab = self.config_tab_keys[0]
 
         self.config_tabs = ft.Tabs(
             animation_duration=250,
             selected_index=0,
-            tabs=[
-                ft.Tab(text="Entradas", icon=ft.Icons.TUNE_ROUNDED, data="inputs"),
-                ft.Tab(text="Señales", icon=ft.Icons.SHOW_CHART_ROUNDED, data="signals"),
-                ft.Tab(text="Espectro", icon=ft.Icons.GRAPHIC_EQ_ROUNDED, data="spectrum"),
-                ft.Tab(text="Diagnóstico", icon=ft.Icons.MEDICAL_SERVICES_ROUNDED, data="diagnostics"),
-            ],
+            tabs=[ft.Tab(text=label, icon=icon) for key, label, icon in tab_definitions],
             on_change=self._on_config_tab_change,
         )
 
