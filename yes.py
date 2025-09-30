@@ -2464,9 +2464,11 @@ class MainApp:
 
             # Espectro de Envolvente (gráfica separada para PDF)
             img_env = None
+            env_visible_peaks: List[Tuple[float, float, float]] = []
             try:
                 xf_env = res.get('envelope', {}).get('f_hz', None)
                 env_amp = res.get('envelope', {}).get('amp', None)
+                peaks_env = res.get('envelope', {}).get('peaks', [])
                 if xf_env is not None and env_amp is not None and len(xf_env) > 0:
                     if hide_lf:
                         m_env = xf_env >= max(0.0, fc)
@@ -2484,10 +2486,11 @@ class MainApp:
                     env_ax.set_xlabel("Frecuencia (Hz)")
                     env_ax.set_ylabel("Amp [a.u.]")
                     try:
-                        vis_peaks = []
+                        vis_peaks: List[Tuple[float, float, float]] = []
                         for p in (peaks_env or []):
                             f0 = float(p.get('f_hz', 0.0))
                             a0 = float(p.get('amp', 0.0))
+                            snr = float(p.get('snr_db', 0.0))
                             if f0 <= 0 or a0 <= 0:
                                 continue
                             if hide_lf and f0 < max(0.0, fc):
@@ -2496,17 +2499,18 @@ class MainApp:
                                 continue
                             if zmin is not None and (f0 < zmin or f0 > zmax):
                                 continue
-                            vis_peaks.append((f0, a0))
+                            vis_peaks.append((f0, a0, snr))
                         if vis_peaks:
                             filtered = vis_peaks
                             if zmin is not None:
-                                tmp = [(f0, a0) for f0, a0 in vis_peaks if zmin <= f0 <= zmax]
+                                tmp = [(f0, a0, snr) for f0, a0, snr in vis_peaks if zmin <= f0 <= zmax]
                                 if tmp:
                                     filtered = tmp
-                            pfx, pfy = zip(*filtered)
-                            env_ax.scatter(pfx, pfy, color="#c0392b", s=20, zorder=5)
-                            peak_points = [(float(f0), float(a0)) for f0, a0 in filtered]
-                            peak_labels = [f"{float(f0):.2f} Hz" for f0, _ in filtered]
+                            env_visible_peaks = [(float(f0), float(a0), float(snr)) for f0, a0, snr in filtered]
+                            pfx, pfy = zip(*[(f0, a0) for f0, a0, _ in env_visible_peaks])
+                            env_ax.scatter(pfx, pfy, color="#c0392b", s=36, zorder=5, edgecolors="white", linewidths=0.6)
+                            peak_points = [(f0, a0) for f0, a0, _ in env_visible_peaks]
+                            peak_labels = [f"{f0:.2f} Hz | {a0:.3f} a.u." for f0, a0, _ in env_visible_peaks]
                             self._place_annotations(env_ax, peak_points, peak_labels, color="#c0392b", text_color="#c0392b")
                     except Exception:
                         pass
@@ -2539,6 +2543,7 @@ class MainApp:
                     img_env = save_plot(env_fig)
             except Exception:
                 img_env = None
+                env_visible_peaks = []
 
             img_runup = None
             try:
@@ -2816,6 +2821,16 @@ class MainApp:
             elements.append(Image(img_fft, width=400, height=150))
             if img_env:
                 elements.append(Image(img_env, width=400, height=150))
+                if env_visible_peaks:
+                    elements.append(Spacer(1, 8))
+                    elements.append(Paragraph("Picos principales (envolvente)", styles['Heading2']))
+                    env_table_data = [["Frecuencia (Hz)", "Amplitud (a.u.)", "SNR (dB)"]]
+                    for f0, a0, snr in env_visible_peaks:
+                        env_table_data.append([f"{f0:.2f}", f"{a0:.3f}", f"{snr:.1f}"])
+                    env_table = Table(env_table_data, colWidths=[120, 140, 120])
+                    _apply_table_style(env_table)
+                    elements.append(env_table)
+                    elements.append(Spacer(1, 12))
             if img_runup:
                 elements.append(Paragraph("Arranque/Paro - Cascada 3D", styles['Heading2']))
                 elements.append(Image(img_runup, width=400, height=180))
