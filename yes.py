@@ -1269,6 +1269,32 @@ class MainApp:
         except Exception:
             pass
 
+    def _on_config_tab_change(self, e: ft.ControlEvent):
+        try:
+            tabs_control = e.control
+            selected_tab = tabs_control.tabs[tabs_control.selected_index]
+            key = getattr(selected_tab, "data", None)
+        except Exception:
+            key = None
+        if not key:
+            return
+        try:
+            new_view = (self.config_tab_views or {}).get(key)
+        except Exception:
+            new_view = None
+        if not new_view:
+            return
+        try:
+            self.active_config_tab = key
+        except Exception:
+            pass
+        try:
+            self.config_tab_body.content = new_view
+            if self.config_tab_body.page:
+                self.config_tab_body.update()
+        except Exception:
+            pass
+
     def _compute_bearing_freqs_click(self, e=None):
         try:
             rpm_val = float(self.rpm_hint_field.value) if getattr(self, "rpm_hint_field", None) and getattr(self.rpm_hint_field, "value", "") else None
@@ -4551,31 +4577,31 @@ class MainApp:
             tight=True,
         )
 
-        config_tabs = ft.Tabs(
+        config_tab_wrappers = {
+            "inputs": ft.Container(content=general_settings, padding=10),
+            "signals": ft.Container(content=signal_settings, padding=10),
+            "spectrum": ft.Container(content=spectrum_settings, padding=10),
+            "diagnostics": ft.Container(content=diagnosis_settings, padding=10),
+        }
+
+        self.config_tab_views = config_tab_wrappers
+        self.active_config_tab = "inputs"
+
+        self.config_tabs = ft.Tabs(
             animation_duration=250,
-            expand=True,
+            selected_index=0,
             tabs=[
-                ft.Tab(
-                    text="Entradas",
-                    icon=ft.Icons.TUNE_ROUNDED,
-                    content=ft.Container(content=general_settings, padding=10),
-                ),
-                ft.Tab(
-                    text="Señales",
-                    icon=ft.Icons.SHOW_CHART_ROUNDED,
-                    content=ft.Container(content=signal_settings, padding=10),
-                ),
-                ft.Tab(
-                    text="Espectro",
-                    icon=ft.Icons.GRAPHIC_EQ_ROUNDED,
-                    content=ft.Container(content=spectrum_settings, padding=10),
-                ),
-                ft.Tab(
-                    text="Diagnóstico",
-                    icon=ft.Icons.MEDICAL_SERVICES_ROUNDED,
-                    content=ft.Container(content=diagnosis_settings, padding=10),
-                ),
+                ft.Tab(text="Entradas", icon=ft.Icons.TUNE_ROUNDED, data="inputs"),
+                ft.Tab(text="Señales", icon=ft.Icons.SHOW_CHART_ROUNDED, data="signals"),
+                ft.Tab(text="Espectro", icon=ft.Icons.GRAPHIC_EQ_ROUNDED, data="spectrum"),
+                ft.Tab(text="Diagnóstico", icon=ft.Icons.MEDICAL_SERVICES_ROUNDED, data="diagnostics"),
             ],
+            on_change=self._on_config_tab_change,
+        )
+
+        self.config_tab_body = ft.Container(
+            content=self.config_tab_views[self.active_config_tab],
+            padding=ft.padding.only(top=6),
         )
 
         action_buttons = ft.Row(
@@ -4599,7 +4625,8 @@ class MainApp:
         self.config_container = ft.Container(
             content=ft.Column(
                 [
-                    config_tabs,
+                    self.config_tabs,
+                    self.config_tab_body,
                     action_buttons,
                 ],
                 spacing=16,
