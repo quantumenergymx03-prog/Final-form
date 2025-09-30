@@ -157,6 +157,14 @@ def _charlotte_faults_lines() -> List[str]:
     return lines
 
 
+def _get_charlotte_entry(code: str) -> Optional[Dict[str, str]]:
+    """Obtiene una entrada de la tabla de Charlotte por su código."""
+    for entry in CHARLOTTE_MOTOR_FAULTS:
+        if entry.get("code") == code:
+            return entry
+    return None
+
+
 def _build_charlotte_reference_table(
     entries: Optional[List[Dict[str, str]]],
     styles,
@@ -780,10 +788,11 @@ def analyze_vibration(
         a_2line = _amp_near(xf, mag_vel_mm, 2.0 * line_freq_hz, df)
         if (a_line > 0.2 * (dom_amp + 1e-12)) or (a_2line > 0.2 * (dom_amp + 1e-12)):
             findings.append(f"Eléctrico: componentes en {line_freq_hz:.0f} Hz y/o {2*line_freq_hz:.0f} Hz.")
-    # Resonancias estructurales: picos agudos no armonicos con Q alto
+    # Resonancias estructurales: estimar frecuencia natural y severidad
+    resonance_candidates: List[Dict[str, Any]] = []
+    resonance_noise_floor: Optional[float] = None
     try:
         if len(peaks_fft) > 0 and len(xf) > 3:
-            # Conjunto de frecuencias conocidas a evitar
             known = []
             if f1 and f1 > 0:
                 for k in range(1, 9):
@@ -795,13 +804,20 @@ def analyze_vibration(
             for name, freq in (("BPFO", bpfo_hz), ("BPFI", bpfi_hz), ("BSF", bsf_hz), ("FTF", ftf_hz)):
                 if freq and freq > 0:
                     known.append(freq)
-            def _near_any(f):
+
+            def _near_any(f: float) -> bool:
                 for fk in known:
                     bw = max(tol_frac * max(f, fk), max(2, min_bins) * (df if df > 0 else 0.0))
                     if abs(f - fk) <= (bw if bw > 0 else 1.0):
                         return True
                 return False
-            resonances = []
+
+            pos_spec = mag_vel_mm[xf > 0]
+            if pos_spec.size > 0:
+                nf = float(np.median(pos_spec))
+                resonance_noise_floor = nf if nf > 0 else None
+            dom_base = float(dom_amp) if np.isfinite(dom_amp) else 0.0
+
             for p in peaks_fft:
                 f0 = float(p.get("f_hz", 0.0))
                 a0 = float(p.get("amp", 0.0))
@@ -809,14 +825,11 @@ def analyze_vibration(
                     continue
                 if _near_any(f0):
                     continue
-                # Estimar Q con ancho a -3 dB (~0.707*A)
                 thr = a0 / np.sqrt(2.0)
                 idx0 = int(np.argmin(np.abs(xf - f0)))
-                # Buscar izquierda
                 iL = idx0
                 while iL > 0 and mag_vel_mm[iL] > thr:
                     iL -= 1
-                # Buscar derecha
                 iR = idx0
                 max_idx = len(mag_vel_mm) - 1
                 while iR < max_idx and mag_vel_mm[iR] > thr:
@@ -826,15 +839,73 @@ def analyze_vibration(
                     fR = float(xf[min(iR, max_idx)])
                     bw = max(fR - fL, df if df > 0 else 1e-6)
                     Q = float(f0 / bw) if bw > 0 else 0.0
-                    # Umbrales: pico relevante y Q alto
-                    if Q >= 8.0 and a0 >= max(0.2 * (dom_amp + 1e-12), 0.3):
-                        resonances.append((f0, Q, a0))
-            # Reportar hasta 2 resonancias principales
-            resonances.sort(key=lambda x: x[2], reverse=True)
-            for f0, Q, a0 in resonances[:2]:
-                findings.append(f"Resonancia estructural probable: pico agudo ~{f0:.1f} Hz (Q~{Q:.1f}).")
+                    if Q >= 4.0 and a0 >= max(0.15 * (dom_base + 1e-12), 0.25):
+                        amp_ratio_dom = float(a0 / dom_base) if dom_base > 1e-9 else None
+                        if resonance_noise_floor and resonance_noise_floor > 1e-9:
+                            amp_ratio_noise = float(a0 / resonance_noise_floor)
+                        else:
+                            amp_ratio_noise = None
+                        sev_lvl = "leve"
+                        if (amp_ratio_dom or 0.0) >= 3.0 or (amp_ratio_noise or 0.0) >= 10.0 or Q >= 15.0:
+                            sev_lvl = "alta"
+                        elif (amp_ratio_dom or 0.0) >= 1.8 or (amp_ratio_noise or 0.0) >= 6.0 or Q >= 10.0:
+                            sev_lvl = "media"
+                        resonance_candidates.append(
+                            {
+                                "natural_freq_hz": float(f0),
+                                "Q": float(Q),
+                                "bandwidth_hz": float(bw),
+                                "amp_mm_s": float(a0),
+                                "amp_ratio_dom": float(amp_ratio_dom) if amp_ratio_dom is not None else None,
+                                "amp_ratio_noise": float(amp_ratio_noise) if amp_ratio_noise is not None else None,
+                                "severity": sev_lvl,
+                            }
+                        )
+            resonance_candidates.sort(key=lambda x: x.get("amp_mm_s", 0.0), reverse=True)
+            if resonance_candidates:
+                entry = _get_charlotte_entry("EM06") or {}
+                title = f"{entry.get('code', 'EM06')} – {entry.get('name', 'Resonancia estructural')}"
+                for res in resonance_candidates[:2]:
+                    msg_parts: List[str] = [
+                        f"{title}: frecuencia natural estimada ~{res['natural_freq_hz']:.1f} Hz (Q≈{res['Q']:.1f})."
+                    ]
+                    msg_parts.append(f"Amplitud {res['amp_mm_s']:.2f} mm/s.")
+                    if res.get("amp_ratio_dom") is not None and dom_base > 1e-6:
+                        msg_parts.append(f"≈{res['amp_ratio_dom']:.1f}× respecto a 1X.")
+                    if res.get("amp_ratio_noise") is not None and resonance_noise_floor and resonance_noise_floor > 1e-6:
+                        msg_parts.append(f"≈{res['amp_ratio_noise']:.1f}× sobre el piso espectral.")
+                    if f1 and f1 > 0:
+                        order = res['natural_freq_hz'] / f1 if f1 > 0 else 0.0
+                        if order > 0:
+                            nearest = max(1, int(round(order)))
+                            detune = abs(res['natural_freq_hz'] - nearest * f1) / res['natural_freq_hz'] * 100.0
+                            msg_parts.append(
+                                f"Cercana a {nearest}X ({nearest * f1:.1f} Hz, desfase {detune:.1f}%)."
+                            )
+                    severity_label = res.get("severity")
+                    if severity_label:
+                        msg_parts.append(f"Severidad estimada: {severity_label}.")
+                    findings.append(" ".join(msg_parts))
     except Exception:
-        pass
+        resonance_candidates = []
+        resonance_noise_floor = None
+    if not resonance_candidates:
+        try:
+            pos_spec = mag_vel_mm[xf > 0]
+            nf = float(np.median(pos_spec)) if pos_spec.size > 0 else 0.0
+            if nf > 0 and dom_amp > 0 and (dom_amp / nf) >= 12.0:
+                resonance_noise_floor = nf
+                entry = _get_charlotte_entry("EM06") or {}
+                title = f"{entry.get('code', 'EM06')} – {entry.get('name', 'Resonancia estructural')}"
+                ratio = dom_amp / nf
+                findings.append(
+                    f"{title}: amplitud dominante {dom_amp:.2f} mm/s (~{ratio:.1f}× el piso espectral) sugiere resonancia estructural; la frecuencia natural no pudo estimarse con precisión."
+                )
+        except Exception:
+            pass
+    resonance_dom_ratio: Optional[float] = None
+    if resonance_noise_floor and resonance_noise_floor > 0 and dom_amp > 0:
+        resonance_dom_ratio = float(dom_amp / resonance_noise_floor)
     if len(findings) == 1:
         findings.append("Sin anomalías evidentes según reglas actuales.")
     severity_summary, core_findings = _split_diagnosis(findings)
@@ -871,6 +942,11 @@ def analyze_vibration(
         "rpm": rpm,
         "f1_hz": f1,
         "severity": {"label": sev_label, "color": sev_color, "rms_mm_s": rms_vel_spec_mm},
+        "resonance": {
+            "candidates": resonance_candidates,
+            "noise_floor_mm_s": resonance_noise_floor,
+            "dominant_to_noise_ratio": resonance_dom_ratio,
+        },
         "diagnosis": findings,
         "diagnosis_summary": severity_summary,
         "diagnosis_findings": core_findings,
