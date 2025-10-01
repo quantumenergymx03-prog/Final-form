@@ -2600,6 +2600,23 @@ class MainApp:
             except Exception:
                 accent_color = colors.HexColor("#1f77b4")
 
+            def _formalize_accent(col: colors.Color) -> colors.Color:
+                try:
+                    base_dark = colors.HexColor("#1b263b")
+                except Exception:
+                    base_dark = colors.HexColor("#1f2a44")
+                luma = 0.299 * col.red + 0.587 * col.green + 0.114 * col.blue
+                mix = 0.6 if luma <= 0.32 else 0.8
+                r = base_dark.red * mix + col.red * (1 - mix)
+                g = base_dark.green * mix + col.green * (1 - mix)
+                b = base_dark.blue * mix + col.blue * (1 - mix)
+                luma2 = 0.299 * r + 0.587 * g + 0.114 * b
+                if luma2 > 0.4:
+                    return base_dark
+                return colors.Color(r, g, b)
+
+            accent_color = _formalize_accent(accent_color)
+
             def _blend_with_white(col: colors.Color, ratio: float) -> colors.Color:
                 ratio = min(max(ratio, 0.0), 1.0)
                 return colors.Color(
@@ -2680,16 +2697,17 @@ class MainApp:
                 page_width, page_height = A4
                 top_bar_height = 18 * mm
                 bottom_bar_height = 10 * mm
+                watermark_color = _blend_with_white(accent_color, 0.5)
                 try:
-                    canv.setFillColor(accent_color)
+                    canv.setFillColor(watermark_color)
                     try:
-                        canv.setFillAlpha(0.12)
+                        canv.setFillAlpha(0.06)
                     except Exception:
                         pass
-                    canv.setFont("Helvetica-Bold", 56)
+                    canv.setFont("Helvetica-Bold", 52)
                     canv.translate(page_width / 2.0, page_height / 2.0)
                     canv.rotate(45)
-                    canv.drawCentredString(0, 0, "V-Analyzer")
+                    canv.drawCentredString(0, -16, "V-Analyzer")
                     canv.translate(-page_width / 2.0, -page_height / 2.0)
                     try:
                         canv.setFillAlpha(1)
@@ -4037,6 +4055,23 @@ class MainApp:
             except Exception:
                 accent_color = colors.HexColor("#1f77b4")
 
+            def _formalize_accent(col: colors.Color) -> colors.Color:
+                try:
+                    base_dark = colors.HexColor("#1b263b")
+                except Exception:
+                    base_dark = colors.HexColor("#1f2a44")
+                luma = 0.299 * col.red + 0.587 * col.green + 0.114 * col.blue
+                mix = 0.6 if luma <= 0.32 else 0.8
+                r = base_dark.red * mix + col.red * (1 - mix)
+                g = base_dark.green * mix + col.green * (1 - mix)
+                b = base_dark.blue * mix + col.blue * (1 - mix)
+                luma2 = 0.299 * r + 0.587 * g + 0.114 * b
+                if luma2 > 0.4:
+                    return base_dark
+                return colors.Color(r, g, b)
+
+            accent_color = _formalize_accent(accent_color)
+
             def _blend_with_white(col: colors.Color, ratio: float) -> colors.Color:
                 ratio = min(max(ratio, 0.0), 1.0)
                 return colors.Color(
@@ -4117,16 +4152,17 @@ class MainApp:
                 page_width, page_height = A4
                 top_bar_height = 18 * mm
                 bottom_bar_height = 10 * mm
+                watermark_color = _blend_with_white(accent_color, 0.5)
                 try:
-                    canv.setFillColor(accent_color)
+                    canv.setFillColor(watermark_color)
                     try:
-                        canv.setFillAlpha(0.12)
+                        canv.setFillAlpha(0.06)
                     except Exception:
                         pass
-                    canv.setFont("Helvetica-Bold", 56)
+                    canv.setFont("Helvetica-Bold", 52)
                     canv.translate(page_width / 2.0, page_height / 2.0)
                     canv.rotate(45)
-                    canv.drawCentredString(0, 0, "V-Analyzer")
+                    canv.drawCentredString(0, -16, "V-Analyzer")
                     canv.translate(-page_width / 2.0, -page_height / 2.0)
                     try:
                         canv.setFillAlpha(1)
@@ -4692,7 +4728,7 @@ class MainApp:
                 ], spacing=10, wrap=True),
                 ft.Row([ft.ElevatedButton("Calcular frecuencias", icon=ft.Icons.FUNCTIONS, on_click=self._compute_bearing_freqs_click)], alignment="start")
             ], spacing=8),
-            visible=False,
+            visible=(self.analysis_mode == "assist"),
         )
 
 
@@ -4928,109 +4964,124 @@ class MainApp:
 
         self.config_expanded = True
 
-        self.config_container = ft.Container(
-
-            content=ft.Column([
-
-                # Fila tiempo y FFT
-
+        general_settings = ft.Column(
+            [
+                ft.Text("Columnas base", size=14, weight="bold"),
                 ft.Row([self.time_dropdown, self.fft_dropdown], spacing=10),
-
-                # Unidad para la señal en tiempo
+                ft.Text("Unidades y colores", size=14, weight="bold"),
                 ft.Row([self.time_unit_dd], spacing=10),
-                ft.Text('Colores de graficas:', size=14),
-
                 ft.Row([self.time_color_dd, self.fft_color_dd], spacing=10),
+            ],
+            spacing=12,
+            tight=True,
+        )
 
-
-
-
-                # Señales
-
-                ft.Text("📊 Señales en tiempo:", size=14),
-
+        signal_settings = ft.Column(
+            [
+                ft.Text("📊 Señales en tiempo", size=14, weight="bold"),
                 ft.Row(self.signal_checkboxes, wrap=True, spacing=10),
                 self.combine_signals_cb,
-
-
-
-
-                # Auxiliares
-
-                ft.Text("📌 Variables auxiliares:", size=14),
-
+                ft.Text("📌 Variables auxiliares", size=14, weight="bold"),
                 ft.Column([
-
                     ft.Row([cb, color_dd, style_dd], spacing=10)
-
                     for cb, color_dd, style_dd in self.aux_controls
+                ], spacing=6),
+            ],
+            spacing=12,
+            tight=True,
+        )
 
-                ], spacing=5),
-
-
-
-                # Periodo
-
-                ft.Text("⏱️ Periodo de análisis:", size=14),
-
+        spectrum_settings = ft.Column(
+            [
+                ft.Text("⏱️ Periodo de análisis", size=14, weight="bold"),
                 ft.Row([self.start_time_field, self.end_time_field], spacing=10),
-
-                # Opciones de espectro (visual)
-                ft.Text("Opciones de espectro (visual):", size=14),
+                ft.Text("Opciones de espectro", size=14, weight="bold"),
                 ft.Row([self.hide_lf_cb, self.lf_cutoff_field, self.hf_limit_field, self.runup_3d_cb], spacing=10, wrap=True),
                 ft.Row([self.orbit_cb, self.orbit_x_dd, self.orbit_y_dd], spacing=10, wrap=True),
                 ft.Column([self.fft_zoom_text, self.fft_zoom_slider], spacing=4),
-                ft.Row([self.db_scale_cb, self.sens_unit_dd, self.sensor_sens_field, self.gain_field], spacing=10),
-                ft.Row([self.db_ref_field, self.db_ymin_field, self.db_ymax_field], spacing=10),
+                ft.Text("Escala y calibración", size=14, weight="bold"),
+                ft.Row([self.db_scale_cb, self.sens_unit_dd, self.sensor_sens_field, self.gain_field], spacing=10, wrap=True),
+                ft.Row([self.db_ref_field, self.db_ymin_field, self.db_ymax_field], spacing=10, wrap=True),
+            ],
+            spacing=12,
+            tight=True,
+        )
 
-                # Parámetros de máquina (opcionales)
-                ft.Text("Parámetros de máquina (opcionales):", size=14),
-                ft.Row([self.analysis_mode_dd, self.rpm_hint_field, self.line_freq_dd, self.gear_teeth_field, ft.OutlinedButton("Rodamientos", icon=ft.Icons.LIST_ALT_ROUNDED, on_click=self._goto_bearings_view)], spacing=10, wrap=True),
+        diagnosis_settings = ft.Column(
+            [
+                ft.Text("Parámetros de máquina", size=14, weight="bold"),
+                ft.Row([
+                    self.analysis_mode_dd,
+                    self.rpm_hint_field,
+                    self.line_freq_dd,
+                    self.gear_teeth_field,
+                    ft.OutlinedButton("Rodamientos", icon=ft.Icons.LIST_ALT_ROUNDED, on_click=self._goto_bearings_view),
+                ], spacing=10, wrap=True),
                 self.assisted_box,
                 ft.Row([self.bpfo_field, self.bpfi_field, self.bsf_field, self.ftf_field], spacing=10, wrap=True),
+            ],
+            spacing=12,
+            tight=True,
+        )
 
+        config_tab_wrappers = {
+            "inputs": ft.Container(content=general_settings, padding=10),
+            "signals": ft.Container(content=signal_settings, padding=10),
+            "spectrum": ft.Container(content=spectrum_settings, padding=10),
+            "diagnostics": ft.Container(content=diagnosis_settings, padding=10),
+        }
 
+        tab_definitions = [
+            ("inputs", "Entradas", ft.Icons.TUNE_ROUNDED),
+            ("signals", "Señales", ft.Icons.SHOW_CHART_ROUNDED),
+            ("spectrum", "Espectro", ft.Icons.GRAPHIC_EQ_ROUNDED),
+            ("diagnostics", "Diagnóstico", ft.Icons.MEDICAL_SERVICES_ROUNDED),
+        ]
 
-                # Botones
+        self.config_tab_views = config_tab_wrappers
+        self.config_tab_keys = [key for key, *_ in tab_definitions]
+        self.active_config_tab = self.config_tab_keys[0]
 
-                ft.Row(
+        self.config_tabs = ft.Tabs(
+            animation_duration=250,
+            selected_index=0,
+            tabs=[ft.Tab(text=label, icon=icon) for key, label, icon in tab_definitions],
+            on_change=self._on_config_tab_change,
+        )
 
-                    alignment="center",
+        self.config_tab_body = ft.Container(
+            content=self.config_tab_views[self.active_config_tab],
+            padding=ft.padding.only(top=6),
+        )
 
-                    spacing=20,
+        action_buttons = ft.Row(
+            alignment="center",
+            spacing=20,
+            controls=[
+                ft.ElevatedButton(
+                    "Generar",
+                    icon=ft.Icons.ANALYTICS_ROUNDED,
+                    on_click=self._update_analysis,
+                    style=ft.ButtonStyle(bgcolor=self._accent_ui(), color="white"),
+                ),
+                ft.OutlinedButton(
+                    "Exportar",
+                    icon=ft.Icons.DOWNLOAD_ROUNDED,
+                    on_click=self.exportar_pdf,
+                ),
+            ],
+        )
 
-                    controls=[
-
-                        ft.ElevatedButton(
-
-                            "Generar",
-
-                            icon=ft.Icons.ANALYTICS_ROUNDED,
-
-                            on_click=self._update_analysis,
-
-                            style=ft.ButtonStyle(bgcolor=self._accent_ui(), color="white")
-
-                        ),
-
-                        ft.OutlinedButton(
-
-                            "Exportar",
-
-                            icon=ft.Icons.DOWNLOAD_ROUNDED,
-
-                            on_click=self.exportar_pdf
-
-                        )
-
-                    ]
-
-                )
-
-            ], spacing=15),
-
-            visible=self.config_expanded
-
+        self.config_container = ft.Container(
+            content=ft.Column(
+                [
+                    self.config_tabs,
+                    self.config_tab_body,
+                    action_buttons,
+                ],
+                spacing=16,
+            ),
+            visible=self.config_expanded,
         )
 
 
