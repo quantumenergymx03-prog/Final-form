@@ -451,6 +451,7 @@ def analyze_vibration(
     acc_ms2: np.ndarray,
     rpm: Optional[float] = None,
     line_freq_hz: Optional[float] = None,
+    vel_hp_hz: Optional[float] = None,
     bpfo_hz: Optional[float] = None,
     bpfi_hz: Optional[float] = None,
     bsf_hz: Optional[float] = None,
@@ -490,7 +491,11 @@ def analyze_vibration(
         dt = float(np.median(np.diff(t))) if len(t) > 1 else 0.0
         fs = 1.0 / dt if dt > 0 else 0.0
         return fs, dt
-    def _acc_fft_to_vel_mm_s(y: np.ndarray, dt: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    def _acc_fft_to_vel_mm_s(
+        y: np.ndarray,
+        dt: float,
+        hp_cut_hz: Optional[float] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
         """
         Calcula espectro de aceleración y velocidad (mm/s) usando rFFT con ventana Hann
         para visualización, y además obtiene RMS de velocidad en el tiempo integrando en 
@@ -516,6 +521,18 @@ def analyze_vibration(
         mag_vel = np.zeros_like(mag_acc)
         pos = xf > 0
         mag_vel[pos] = mag_acc[pos] / (2.0 * np.pi * xf[pos])  # m/s
+
+        hp_mask = None
+        if hp_cut_hz is not None:
+            try:
+                cutoff = float(hp_cut_hz)
+            except Exception:
+                cutoff = 0.0
+            if np.isfinite(cutoff) and cutoff > 0.0:
+                hp_mask = pos & (xf < cutoff)
+                if np.any(hp_mask):
+                    mag_vel[hp_mask] = 0.0
+
         mag_vel_mm = mag_vel * 1000.0
 
         # RMS de velocidad temporal via integración en frecuencia (sin ventana)
@@ -523,6 +540,8 @@ def analyze_vibration(
         V = np.zeros_like(Y, dtype=complex)
         pos_idx = xf > 0
         V[pos_idx] = Y[pos_idx] / (1j * 2.0 * np.pi * xf[pos_idx])
+        if hp_mask is not None and np.any(hp_mask):
+            V[hp_mask] = 0.0
         V[0] = 0.0
         v_t = np.fft.irfft(V, n=N)
         rms_vel_time_mm = 1000.0 * float(np.sqrt(np.mean(v_t**2)))
@@ -650,8 +669,18 @@ def analyze_vibration(
     except Exception:
         trend = np.full_like(a, float(np.mean(a)))
     a_proc = a - trend
+    hp_cut = None
+    try:
+        if vel_hp_hz is None:
+            hp_cut = 0.5
+        else:
+            hp_candidate = float(vel_hp_hz)
+            if np.isfinite(hp_candidate) and hp_candidate > 0.0:
+                hp_cut = hp_candidate
+    except Exception:
+        hp_cut = 0.5 if vel_hp_hz is None else None
     df = fs / len(a) if fs > 0 and len(a) > 0 else 0.0
-    xf, mag_acc, mag_vel_mm, rms_vel_time_mm = _acc_fft_to_vel_mm_s(a_proc, dt)
+    xf, mag_acc, mag_vel_mm, rms_vel_time_mm = _acc_fft_to_vel_mm_s(a_proc, dt, hp_cut)
     # RMS de aceleración sin DC/tendencia
     rms_time_acc = float(np.sqrt(np.mean(a_proc**2))) if len(a_proc) else 0.0
     peak_acc = float(np.max(np.abs(a))) if len(a) else 0.0
@@ -2229,11 +2258,16 @@ class MainApp:
                 _fmax_pre = float(self.hf_limit_field.value) if getattr(self, 'hf_limit_field', None) and getattr(self.hf_limit_field, 'value', '') else None
             except Exception:
                 _fmax_pre = None
+            try:
+                _vel_hp = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+            except Exception:
+                _vel_hp = 0.5
             res = analyze_vibration(
                 t_seg,
                 sig_seg,
                 rpm=rpm_val,
                 line_freq_hz=line_val,
+                vel_hp_hz=_vel_hp,
                 bpfo_hz=self._fldf(getattr(self, 'bpfo_field', None)),
                 bpfi_hz=self._fldf(getattr(self, 'bpfi_field', None)),
                 bsf_hz=self._fldf(getattr(self, 'bsf_field', None)),
@@ -2281,11 +2315,16 @@ class MainApp:
                 _fmax_pre = float(self.hf_limit_field.value) if getattr(self, 'hf_limit_field', None) and getattr(self.hf_limit_field, 'value', '') else None
             except Exception:
                 _fmax_pre = None
+            try:
+                _vel_hp = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+            except Exception:
+                _vel_hp = 0.5
             res = analyze_vibration(
                 t_seg,
                 sig_seg,
                 rpm=rpm_val,
                 line_freq_hz=line_val,
+                vel_hp_hz=_vel_hp,
                 bpfo_hz=self._fldf(getattr(self, 'bpfo_field', None)),
                 bpfi_hz=self._fldf(getattr(self, 'bpfi_field', None)),
                 bsf_hz=self._fldf(getattr(self, 'bsf_field', None)),
@@ -5469,7 +5508,7 @@ class MainApp:
 
         return lines
 
-    def _acc_to_vel_time_mm(self, acc: np.ndarray, t: np.ndarray) -> np.ndarray:
+    def _acc_to_vel_time_mm(self, acc: np.ndarray, t: np.ndarray, hp_cut_hz: Optional[float] = None) -> np.ndarray:
         """
         Integra aceleración en el dominio de la frecuencia para obtener velocidad en el tiempo (mm/s).
         - Usa rFFT, divide por j*2*pi*f (f>0), fuerza DC=0 para evitar deriva y hace irFFT.
@@ -5487,6 +5526,15 @@ class MainApp:
         V = np.zeros_like(Af, dtype=complex)
         pos = xf > 0
         V[pos] = Af[pos] / (1j * 2.0 * np.pi * xf[pos])
+        if hp_cut_hz is not None:
+            try:
+                cutoff = float(hp_cut_hz)
+            except Exception:
+                cutoff = 0.0
+            if np.isfinite(cutoff) and cutoff > 0.0:
+                hp_mask = pos & (xf < cutoff)
+                if np.any(hp_mask):
+                    V[hp_mask] = 0.0
         V[0] = 0.0
         v_t = np.fft.irfft(V, n=N)
         return 1000.0 * v_t  # mm/s
@@ -5911,11 +5959,16 @@ class MainApp:
                 _fmax_pre = float(self.hf_limit_field.value) if getattr(self, 'hf_limit_field', None) and getattr(self.hf_limit_field, 'value', '') else None
             except Exception:
                 _fmax_pre = None
+            try:
+                _vel_hp = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+            except Exception:
+                _vel_hp = 0.5
             res = analyze_vibration(
                 t_segment,
                 signal_segment,
                 rpm=rpm_val,
                 line_freq_hz=line_val,
+                vel_hp_hz=_vel_hp,
                 bpfo_hz=self._fldf(getattr(self, 'bpfo_field', None)),
                 bpfi_hz=self._fldf(getattr(self, 'bpfi_field', None)),
                 bsf_hz=self._fldf(getattr(self, 'bsf_field', None)),
@@ -6037,8 +6090,12 @@ class MainApp:
                 unit_mode = getattr(self, "time_unit_dd", None).value if getattr(self, "time_unit_dd", None) else "vel_mm"
             except Exception:
                 unit_mode = "vel_mm"
+            try:
+                vel_hp_ui = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+            except Exception:
+                vel_hp_ui = 0.5
             if unit_mode == "vel_mm":
-                _y_time = self._acc_to_vel_time_mm(signal_segment, t_segment)
+                _y_time = self._acc_to_vel_time_mm(signal_segment, t_segment, vel_hp_ui)
                 _ylabel = "Velocidad [mm/s]"
                 _rms_text = f"RMS vel: {self._calculate_rms(_y_time):.3f} mm/s" if _y_time.size else "RMS vel: 0.000 mm/s"
             elif unit_mode == "acc_g":
