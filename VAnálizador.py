@@ -1061,6 +1061,7 @@ class MainApp:
         self.uploaded_files = []
 
         self.current_df = None
+        self.current_sampling_rate_hz: Optional[float] = None
 
         self.file_data_storage = {}  # Almacenar datos de archivos
         self._fft_zoom_range: Optional[Tuple[float, float]] = None
@@ -7524,6 +7525,7 @@ class MainApp:
                 if not self.uploaded_files:
 
                     self.current_df = None
+                    self.current_sampling_rate_hz = None
 
                 else:
 
@@ -7588,6 +7590,102 @@ class MainApp:
             pass
         self._refresh_files_list()
 
+    def _maybe_adapt_motor_format(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Optional[str]]:
+        """Detecta archivos de motor (Timestamp/AccX/AccY/AccZ) y normaliza el tiempo."""
+
+        message: Optional[str] = None
+        self.current_sampling_rate_hz = None
+
+        try:
+            if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+                return df, message
+
+            normalized_cols = {str(col).strip().lower(): str(col) for col in df.columns}
+            required = ("timestamp", "accx", "accy", "accz")
+            if not all(name in normalized_cols for name in required):
+                return df, message
+
+            ts_col = normalized_cols["timestamp"]
+            x_col = normalized_cols["accx"]
+            y_col = normalized_cols["accy"]
+            z_col = normalized_cols["accz"]
+
+            work_df = df.copy()
+
+            t_series = pd.to_numeric(work_df[ts_col], errors="coerce")
+            x_series = pd.to_numeric(work_df[x_col], errors="coerce")
+            y_series = pd.to_numeric(work_df[y_col], errors="coerce")
+            z_series = pd.to_numeric(work_df[z_col], errors="coerce")
+
+            valid_mask = t_series.notna() & x_series.notna() & y_series.notna() & z_series.notna()
+            if not bool(valid_mask.any()):
+                return df, message
+
+            work_df = work_df.loc[valid_mask].reset_index(drop=True)
+            t_raw = t_series.loc[valid_mask].to_numpy(dtype=float)
+            acc_x = x_series.loc[valid_mask].to_numpy(dtype=float)
+            acc_y = y_series.loc[valid_mask].to_numpy(dtype=float)
+            acc_z = z_series.loc[valid_mask].to_numpy(dtype=float)
+
+            if t_raw.size < 2:
+                return work_df, message
+
+            diffs = np.diff(t_raw)
+            valid_diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+            median_step = float(np.median(valid_diffs)) if valid_diffs.size else None
+            t_span = float(np.nanmax(t_raw) - np.nanmin(t_raw)) if t_raw.size else 0.0
+            max_abs_t = float(np.nanmax(np.abs(t_raw))) if t_raw.size else 0.0
+
+            scale = 1.0
+            units = "s"
+            if median_step is not None and median_step > 0:
+                if t_span >= 1e5 or max_abs_t >= 1e5 or median_step >= 100.0:
+                    scale = 1e6
+                    units = "μs"
+                elif t_span >= 5e3 or max_abs_t >= 5e3 or median_step >= 5.0:
+                    scale = 1e3
+                    units = "ms"
+
+            if scale <= 0:
+                scale = 1.0
+                units = "s"
+
+            t_seconds = (t_raw - t_raw[0]) / scale
+
+            time_col_name = "time_seconds"
+            counter = 1
+            while time_col_name in work_df.columns:
+                counter += 1
+                time_col_name = f"time_seconds_{counter}"
+            work_df.insert(0, time_col_name, t_seconds)
+
+            work_df[ts_col] = t_raw
+            work_df[x_col] = acc_x
+            work_df[y_col] = acc_y
+            work_df[z_col] = acc_z
+
+            work_df["acc_x"] = acc_x
+            work_df["acc_y"] = acc_y
+            work_df["acc_z"] = acc_z
+
+            fs_est = (scale / median_step) if (median_step and median_step > 0) else None
+            if fs_est is not None and np.isfinite(fs_est):
+                self.current_sampling_rate_hz = float(fs_est)
+
+            freq_msg = (
+                f" Frecuencia de muestreo estimada ≈ {self.current_sampling_rate_hz:.2f} Hz."
+                if self.current_sampling_rate_hz is not None
+                else ""
+            )
+            message = (
+                f"Datos de motor detectados ({units}). Se agregó la columna '{time_col_name}' en segundos." + freq_msg
+            )
+
+            return work_df, message
+
+        except Exception:
+            # En caso de error, mantener el DataFrame original sin interrumpir el flujo
+            return df, message
 
 
     def _load_file_data(self, file_path):
@@ -7595,56 +7693,45 @@ class MainApp:
         try:
 
             if file_path.endswith('.csv'):
-
                 df = pd.read_csv(file_path)
-
             elif file_path.endswith('.xlsx'):
-
                 df = pd.read_excel(file_path)
-
             else:
-
                 df = pd.read_csv(file_path)
 
-
-
-            # Detectar columnas numéricas
+            df, adapt_message = self._maybe_adapt_motor_format(df)
 
             numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
 
             if not numeric_cols:
-
                 self._log(f"Archivo inválido: {file_path} no tiene columnas numéricas")
-
                 self.page.snack_bar = ft.SnackBar(
-
                     content=ft.Text("⚠️ El archivo no contiene columnas numéricas para análisis"),
-
                     bgcolor="#e74c3c",
-
                 )
-
                 self.page.snack_bar.open = True
-
                 self.page.update()
-
                 return
 
+            preferred_time = next((c for c in numeric_cols if c.lower().startswith("time_seconds")), None)
+            if preferred_time is None:
+                time_candidates = [c for c in numeric_cols if "time" in c.lower()]
+                if not time_candidates:
+                    time_candidates = [c for c in numeric_cols if "t" in c.lower()]
+                preferred_time = time_candidates[0] if time_candidates else numeric_cols[0]
 
+            self.default_time_col = preferred_time
 
-            # Columna de tiempo y señales
-
-            time_candidates = [c for c in numeric_cols if "t" in c.lower()]
-
-            self.default_time_col = time_candidates[0] if time_candidates else numeric_cols[0]
-
-            self.default_signal_cols = [c for c in numeric_cols if c != self.default_time_col]
-
-
+            remaining_signals = [c for c in numeric_cols if c != self.default_time_col]
+            prioritized = [c for c in ("acc_x", "acc_y", "acc_z") if c in remaining_signals]
+            others = [c for c in remaining_signals if c not in prioritized]
+            self.default_signal_cols = prioritized + others
 
             self.file_data_storage[file_path] = df
-
             self.current_df = df
+
+            if adapt_message:
+                self._log(adapt_message)
 
             self._log(f"Datos cargados: {file_path} ({len(df)} filas, {len(df.columns)} columnas)")
 
