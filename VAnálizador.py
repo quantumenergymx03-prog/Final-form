@@ -1363,7 +1363,7 @@ class MainApp:
         except Exception:
             pass
 
-    def _on_config_tab_change(self, e: ft.ControlEvent):
+    def _handle_config_tab_change(self, e: ft.ControlEvent):
         key = None
         try:
             tabs_control = e.control
@@ -1391,6 +1391,10 @@ class MainApp:
                 self.config_tab_body.update()
         except Exception:
             pass
+
+    # Compatibilidad hacia atrás: mantener el nombre anterior si otros métodos lo usan
+    def _on_config_tab_change(self, e: ft.ControlEvent):
+        self._handle_config_tab_change(e)
 
     def _compute_bearing_freqs_click(self, e=None):
         try:
@@ -4758,7 +4762,7 @@ class MainApp:
             animation_duration=250,
             selected_index=0,
             tabs=[ft.Tab(text=label, icon=icon) for key, label, icon in tab_definitions],
-            on_change=self._on_config_tab_change,
+            on_change=self._handle_config_tab_change,
         )
 
         self.config_tab_body = ft.Container(
