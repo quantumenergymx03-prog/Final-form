@@ -33,6 +33,7 @@ from reportlab.platypus import (
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
+from reportlab.lib.units import mm
 import tempfile
 import shutil
 
@@ -2587,6 +2588,7 @@ class MainApp:
                     aux_ax.set_ylabel(col)
                     aux_imgs.append(save_plot(aux_fig))
 
+            # Crear PDF
             doc = SimpleDocTemplate(pdf_path, pagesize=A4)
             styles = getSampleStyleSheet()
             try:
@@ -2597,6 +2599,32 @@ class MainApp:
                 accent_color = colors.HexColor(accent_hex)
             except Exception:
                 accent_color = colors.HexColor("#1f77b4")
+
+            def _formalize_accent(col: colors.Color) -> colors.Color:
+                try:
+                    base_dark = colors.HexColor("#1b263b")
+                except Exception:
+                    base_dark = colors.HexColor("#1f2a44")
+                luma = 0.299 * col.red + 0.587 * col.green + 0.114 * col.blue
+                mix = 0.6 if luma <= 0.32 else 0.8
+                r = base_dark.red * mix + col.red * (1 - mix)
+                g = base_dark.green * mix + col.green * (1 - mix)
+                b = base_dark.blue * mix + col.blue * (1 - mix)
+                luma2 = 0.299 * r + 0.587 * g + 0.114 * b
+                if luma2 > 0.4:
+                    return base_dark
+                return colors.Color(r, g, b)
+
+            accent_color = _formalize_accent(accent_color)
+
+            def _blend_with_white(col: colors.Color, ratio: float) -> colors.Color:
+                ratio = min(max(ratio, 0.0), 1.0)
+                return colors.Color(
+                    col.red + (1.0 - col.red) * ratio,
+                    col.green + (1.0 - col.green) * ratio,
+                    col.blue + (1.0 - col.blue) * ratio,
+                )
+
             title_style = ParagraphStyle(
                 "title",
                 parent=styles['Title'],
@@ -2628,6 +2656,23 @@ class MainApp:
                     spaceAfter=4,
                 )
             )
+            styles.add(
+                ParagraphStyle(
+                    "Muted",
+                    parent=styles['Normal'],
+                    textColor=colors.HexColor("#7f8c8d"),
+                    fontSize=9,
+                )
+            )
+            styles.add(
+                ParagraphStyle(
+                    "KeyMetric",
+                    parent=styles['BodyText'],
+                    alignment=1,
+                    leading=14,
+                    spaceAfter=0,
+                )
+            )
 
             def _apply_table_style(tbl: Table) -> None:
                 tbl.setStyle(
@@ -2644,27 +2689,101 @@ class MainApp:
                     )
                 )
 
+            generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            usable_width = doc.width
+
+            def _draw_page_frame(canv, doc_obj, *, first: bool = False) -> None:
+                canv.saveState()
+                page_width, page_height = A4
+                top_bar_height = 18 * mm
+                bottom_bar_height = 10 * mm
+                watermark_color = _blend_with_white(accent_color, 0.5)
+                try:
+                    canv.setFillColor(watermark_color)
+                    try:
+                        canv.setFillAlpha(0.06)
+                    except Exception:
+                        pass
+                    canv.setFont("Helvetica-Bold", 52)
+                    canv.translate(page_width / 2.0, page_height / 2.0)
+                    canv.rotate(45)
+                    canv.drawCentredString(0, -16, "V-Analyzer")
+                    canv.translate(-page_width / 2.0, -page_height / 2.0)
+                    try:
+                        canv.setFillAlpha(1)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+                try:
+                    canv.setFillColor(accent_color)
+                    canv.rect(0, page_height - top_bar_height, page_width, top_bar_height, fill=1, stroke=0)
+                    canv.setFillColor(_blend_with_white(accent_color, 0.85))
+                    canv.rect(0, 0, page_width, bottom_bar_height, fill=1, stroke=0)
+                except Exception:
+                    pass
+
+                try:
+                    canv.setFillColor(colors.white)
+                    canv.setFont("Helvetica-Bold", 16)
+                    canv.drawString(24, page_height - top_bar_height + 6, "Informe de Vibraciones")
+                    canv.setFont("Helvetica", 9)
+                    canv.drawRightString(page_width - 24, page_height - top_bar_height + 6, generated_at)
+                except Exception:
+                    pass
+
+                try:
+                    canv.setFillColor(colors.HexColor("#34495e"))
+                    canv.setFont("Helvetica", 9)
+                    canv.drawString(24, bottom_bar_height / 2.0, f"Emitido con V-Analyzer {APP_VERSION}")
+                    canv.drawRightString(page_width - 24, bottom_bar_height / 2.0, f"Página {canv.getPageNumber()}")
+                except Exception:
+                    pass
+
+                canv.restoreState()
+
+            def _first_page(canv, doc_obj):
+                _draw_page_frame(canv, doc_obj, first=True)
+
+            def _later_pages(canv, doc_obj):
+                _draw_page_frame(canv, doc_obj, first=False)
+
             elements = []
             elements.append(Paragraph("Informe de Análisis de Vibraciones", title_style))
-            elements.append(Spacer(1, 18))
-            elements.append(Paragraph(f"Archivo analizado: {base_name}", styles['Normal']))
-            elements.append(Paragraph(f"Periodo analizado: {start_t:.2f}s - {end_t:.2f}s", styles['Normal']))
-            elements.append(Paragraph(f"Fecha de generacion: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
-            elements.append(Paragraph(f"Aplicacion: V-Analyzer {APP_VERSION}", styles['Normal']))
-            elements.append(Spacer(1, 18))
+            elements.append(Paragraph("Reporte técnico ejecutivo", styles['Muted']))
+            elements.append(Spacer(1, 6))
 
-            cover_summary = [
-                ["Indicador", "Valor"],
-                ["RMS velocidad", f"{rms_mm:.3f} mm/s"],
-                ["Clasificacion ISO", severity_mm],
-                ["Frecuencia dominante", f"{features_full['dom_freq']:.2f} Hz"],
-            ]
-            tbl_cover = Table(cover_summary, colWidths=[200, 200])
-            _apply_table_style(tbl_cover)
-            elements.append(tbl_cover)
-            elements.append(PageBreak())
+            info_table = Table(
+                [
+                    ["Archivo analizado", base_name],
+                    ["Periodo evaluado", f"{start_t:.2f}s – {end_t:.2f}s"],
+                    ["Fecha de emisión", generated_at],
+                    ["Aplicación", f"V-Analyzer {APP_VERSION}"],
+                ],
+                colWidths=[usable_width * 0.35, usable_width * 0.65],
+            )
+            info_table.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (0, -1), _blend_with_white(accent_color, 0.1)),
+                        ("TEXTCOLOR", (0, 0), (0, -1), colors.white),
+                        ("FONTNAME", (0, 0), (0, -1), 'Helvetica-Bold'),
+                        ("BACKGROUND", (1, 0), (1, -1), colors.HexColor("#f7f9fb")),
+                        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d0d7de")),
+                        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#d0d7de")),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                        ("TOPPADDING", (0, 0), (-1, -1), 6),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                    ]
+                )
+            )
+            elements.append(info_table)
+            elements.append(Spacer(1, 16))
 
-            # Nota filtro visual (export): obtiene estado actual de la UI
             try:
                 _pdf_fc = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
             except Exception:
@@ -2679,15 +2798,62 @@ class MainApp:
             exec_findings_all = list(findings_core_pdf)
             exec_findings = self._select_main_findings(exec_findings_all)
             if not exec_findings:
-                exec_findings = ["Sin anomalias evidentes segun reglas actuales."]
-            elements.append(Paragraph(f"Clasificacion ISO: {severity_mm}", styles['Normal']))
-            elements.append(Paragraph(f"RMS velocidad: {rms_mm:.3f} mm/s", styles['Normal']))
-            elements.append(Paragraph(f"Frecuencia dominante: {features_full['dom_freq']:.2f} Hz", styles['Normal']))
-            elements.append(Paragraph(_pdf_fft_filter_note, styles['Normal']))
-            elements.append(Spacer(1, 8))
-            # Semáforo de severidad (actual + otros atenuados)
+                exec_findings = ["Sin anomalías evidentes según reglas actuales."]
+
+            metric_cards = Table(
+                [
+                    [
+                        Paragraph(
+                            f"<font color='#7f8c8d' size=9>Clasificación ISO</font><br/><font size=16><b>{severity_mm}</b></font>",
+                            styles['KeyMetric'],
+                        ),
+                        Paragraph(
+                            f"<font color='#7f8c8d' size=9>RMS velocidad</font><br/><font size=16><b>{rms_mm:.3f} mm/s</b></font>",
+                            styles['KeyMetric'],
+                        ),
+                        Paragraph(
+                            f"<font color='#7f8c8d' size=9>Frecuencia dominante</font><br/><font size=16><b>{features_full['dom_freq']:.2f} Hz</b></font>",
+                            styles['KeyMetric'],
+                        ),
+                    ]
+                ],
+                colWidths=[usable_width / 3.0] * 3,
+            )
+            metric_cards.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, -1), _blend_with_white(accent_color, 0.85)),
+                        ("BOX", (0, 0), (-1, -1), 0.5, _blend_with_white(accent_color, 0.5)),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.5, _blend_with_white(accent_color, 0.5)),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                        ("TOPPADDING", (0, 0), (-1, -1), 8),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                    ]
+                )
+            )
+            elements.append(metric_cards)
+            elements.append(Spacer(1, 12))
+
+            exec_bullets = [
+                ListItem(Paragraph(text, styles['Normal']), bulletColor=accent_color)
+                for text in exec_findings
+            ]
+            elements.append(
+                ListFlowable(
+                    exec_bullets,
+                    bulletType='bullet',
+                    bulletColor=accent_color,
+                    start='bulletchar',
+                    leftIndent=16,
+                )
+            )
+            elements.append(Spacer(1, 6))
+            elements.append(Paragraph(_pdf_fft_filter_note, styles['Muted']))
+            elements.append(Spacer(1, 12))
+
             try:
-                # Mapear label a índice
                 def _sev_index(lbl: str) -> int:
                     s = (lbl or "").lower()
                     if "buena" in s:
@@ -2699,32 +2865,30 @@ class MainApp:
                     if "inaceptable" in s:
                         return 3
                     return -1
+
                 cur_idx = _sev_index(severity_mm)
-                # Colores base
                 base = [
                     ("Buena", "#2ecc71"),
                     ("Satisfactoria", "#f1c40f"),
                     ("Insatisfactoria", "#e67e22"),
                     ("Inaceptable", "#e74c3c"),
                 ]
-                # Helper para aclarar colores
-                def _lighten_hex(hx: str, f: float):
-                    try:
-                        hx = hx.lstrip('#')
-                        r = int(hx[0:2], 16) / 255.0
-                        g = int(hx[2:4], 16) / 255.0
-                        b = int(hx[4:6], 16) / 255.0
-                        r = r + (1.0 - r) * f
-                        g = g + (1.0 - g) * f
-                        b = b + (1.0 - b) * f
-                        from reportlab.lib import colors as _c
-                        return _c.Color(r, g, b)
-                    except Exception:
-                        return colors.lightgrey
-                # Construir tabla de 2 filas: bloques de color + etiquetas
-                cells = ["", "", "", ""]
-                labels = [t for t, _ in base]
-                sem_tbl = Table([cells, labels], colWidths=[90, 110, 130, 120])
+
+                def _lighten_hex(hx: str, factor: float = 0.55) -> colors.Color:
+                    factor = min(max(factor, 0.0), 1.0)
+                    col = colors.HexColor(hx)
+                    r = col.red + (1 - col.red) * factor
+                    g = col.green + (1 - col.green) * factor
+                    b = col.blue + (1 - col.blue) * factor
+                    return colors.Color(r, g, b)
+
+                cells = []
+                labels = []
+                for name, hx in base:
+                    para = Paragraph(f"<b>{name}</b>", styles['Normal'])
+                    cells.append(para)
+                    labels.append(Paragraph("", styles['Normal']))
+                sem_tbl = Table([cells, labels], colWidths=[usable_width / 4.5] * 4)
                 ts = []
                 for i, (name, hx) in enumerate(base):
                     if i == cur_idx:
@@ -2737,112 +2901,143 @@ class MainApp:
                     ts.append(("ALIGN", (i, 1), (i, 1), "CENTER"))
                 ts.append(("GRID", (0, 1), (-1, 1), 0.25, colors.grey))
                 sem_tbl.setStyle(TableStyle(ts))
-                elements.append(Paragraph("Semáforo de severidad", styles['Heading2']))
+                elements.append(Paragraph("Semáforo de severidad", styles['SectionHeading']))
                 elements.append(sem_tbl)
                 elements.append(Spacer(1, 12))
             except Exception:
                 pass
-            # Omitir bloque duplicado de diagnostico para evitar repeticion
-            # elements.append(Paragraph("Diagnostico:", styles['Heading2']))
-            for item in []:
-                elements.append(Paragraph(f"- {item}", styles['Normal']))
 
-            # Explicacion y recomendaciones (PDF)
-            # Explicación y recomendaciones (unificadas con la app)
             exp_lines_pdf2 = self._build_explanations(res, exec_findings)
-            elements.append(Paragraph("Explicacion y recomendaciones", styles['Heading2']))
-            for line in exp_lines_pdf2:
-                elements.append(Paragraph(f"- {line}", styles['Normal']))
+            primary_recommendations = exp_lines_pdf2[:3]
+            extended_recommendations = exp_lines_pdf2[3:]
+            if primary_recommendations:
+                elements.append(Paragraph("Recomendaciones prioritarias", styles['SectionHeading']))
+                rec_bullets = [
+                    ListItem(Paragraph(text, styles['Normal']), bulletColor=accent_color)
+                    for text in primary_recommendations
+                ]
+                elements.append(
+                    ListFlowable(
+                        rec_bullets,
+                        bulletType='bullet',
+                        bulletColor=accent_color,
+                        start='bulletchar',
+                        leftIndent=16,
+                    )
+                )
+                elements.append(Spacer(1, 12))
 
-            
+            elements.append(PageBreak())
 
             elements.append(Paragraph("Reporte de Análisis de Vibraciones", title_style))
             elements.append(Paragraph(f"Archivo: {base_name}", styles['Normal']))
-            elements.append(Paragraph(f"Periodo: {start_t:.2f}s - {end_t:.2f}s", styles['Normal']))
+            elements.append(Paragraph(f"Periodo: {start_t:.2f}s – {end_t:.2f}s", styles['Normal']))
             elements.append(Spacer(1, 12))
 
-            # Top picos (FFT)
+            if extended_recommendations:
+                elements.append(Paragraph("Recomendaciones complementarias", styles['SectionHeading']))
+                extra_bullets = [
+                    ListItem(Paragraph(text, styles['Normal']), bulletColor=accent_color)
+                    for text in extended_recommendations
+                ]
+                elements.append(
+                    ListFlowable(
+                        extra_bullets,
+                        bulletType='bullet',
+                        bulletColor=accent_color,
+                        start='bulletchar',
+                        leftIndent=16,
+                    )
+                )
+                elements.append(Spacer(1, 12))
+
             if top_peaks:
-                elements.append(Paragraph("Picos principales (FFT)", styles['Heading2']))
+                elements.append(Paragraph("Componentes espectrales destacados", styles['SectionHeading']))
                 peaks_data = [["Frecuencia (Hz)", "Amplitud (mm/s)", "Orden (X)"]]
                 for pf, pa, order in top_peaks:
                     peaks_data.append([f"{pf:.2f}", f"{pa:.3f}", f"{order:.2f}" if order else "-"])
-                tbl_peaks = Table(peaks_data, colWidths=[120, 140, 120])
+                tbl_peaks = Table(peaks_data, colWidths=[usable_width * 0.28, usable_width * 0.36, usable_width * 0.28])
                 _apply_table_style(tbl_peaks)
                 elements.append(tbl_peaks)
                 elements.append(Spacer(1, 12))
 
-            data_summary = [
-                ["Metrica", "Valor"],
-                ["RMS (velocidad)", f"{rms_mm:.3f} mm/s"],
-                ["Clasificacion ISO", severity_mm],
-                ["Frecuencia dominante", f"{features_full['dom_freq']:.2f} Hz"],
+            analysis_details = [
+                ["RMS aceleración (m/s²)", f"{features_full['rms_time_acc']:.3e}"],
+                ["Pico aceleración (m/s²)", f"{features_full['peak_acc']:.3e}"],
+                ["Pico a pico (m/s²)", f"{features_full['pp_acc']:.3e}"],
+                ["Crest factor", f"{features_full['crest']:.2f}"],
+                ["Energía baja (0-30 Hz)", f"{(100.0 * features_full['e_low'] / max(features_full['e_total'], 1e-12)):.1f}%"],
+                ["Energía media (30-120 Hz)", f"{(100.0 * features_full['e_mid'] / max(features_full['e_total'], 1e-12)):.1f}%"],
+                ["Energía alta (≥120 Hz)", f"{(100.0 * features_full['e_high'] / max(features_full['e_total'], 1e-12)):.1f}%"],
+                ["Relación 2X", f"{features_full['r2x']:.2f}"],
+                ["Relación 3X", f"{features_full['r3x']:.2f}"],
             ]
-            table_summary = Table(data_summary, colWidths=[200, 200])
-            _apply_table_style(table_summary)
-            elements.append(table_summary)
+            tbl_analysis = Table([["Métrica", "Valor"]] + analysis_details, colWidths=[usable_width * 0.45, usable_width * 0.55])
+            _apply_table_style(tbl_analysis)
+            elements.append(tbl_analysis)
             elements.append(Spacer(1, 12))
 
-            elements.append(Image(img_time, width=400, height=150))
-            elements.append(Image(img_fft, width=400, height=150))
+            elements.append(Paragraph("Visualizaciones clave", styles['SectionHeading']))
+            elements.append(Image(img_time, width=usable_width, height=150))
+            elements.append(Image(img_fft, width=usable_width, height=150))
+
             if img_env:
-                elements.append(Image(img_env, width=400, height=150))
+                elements.append(Image(img_env, width=usable_width, height=150))
             if img_runup:
-                elements.append(Paragraph("Arranque/Paro - Cascada 3D", styles['Heading2']))
-                elements.append(Image(img_runup, width=400, height=180))
+                elements.append(Paragraph("Arranque/Paro - Cascada 3D", styles['SectionHeading']))
+                elements.append(Image(img_runup, width=usable_width, height=180))
             if img_orbit:
-                elements.append(Paragraph("Análisis de órbita", styles['Heading2']))
-                elements.append(Image(img_orbit, width=320, height=320))
+                elements.append(Paragraph("Análisis de órbita", styles['SectionHeading']))
+                elements.append(Image(img_orbit, width=usable_width * 0.8, height=320))
 
             if aux_imgs:
-                elements.append(Paragraph("Variables auxiliares", styles['Heading2']))
+                elements.append(Paragraph("Variables auxiliares", styles['SectionHeading']))
                 for img in aux_imgs:
-                    elements.append(Image(img, width=400, height=120))
+                    elements.append(Image(img, width=usable_width, height=120))
                 aux_data = [["Variable", "Promedio", "Mínimo", "Máximo"]]
                 for col, _, _ in aux_selected:
-                    if col in self.current_df.columns:
-                        vals = self.current_df[col].dropna().to_numpy()
-                        if len(vals) > 0:
-                            aux_data.append([col, f"{np.mean(vals):.2f}", f"{np.min(vals):.2f}", f"{np.max(vals):.2f}"])
+                    vals = self.current_df[col].dropna().to_numpy()
+                    if len(vals) > 0:
+                        aux_data.append([col, f"{np.mean(vals):.2f}", f"{np.min(vals):.2f}", f"{np.max(vals):.2f}"])
                 if len(aux_data) > 1:
-                    aux_table = Table(aux_data, colWidths=[150, 100, 100, 100])
+                    aux_table = Table(aux_data, colWidths=[usable_width * 0.4, usable_width * 0.2, usable_width * 0.2, usable_width * 0.2])
                     _apply_table_style(aux_table)
                     elements.append(aux_table)
 
             elements.append(Spacer(1, 12))
-            elements.append(Paragraph("Diagnóstico", styles['SectionHeading']))
+            elements.append(Paragraph("Diagnóstico técnico", styles['SectionHeading']))
             elements.append(
                 Paragraph(
-                    f"El valor RMS calculado es {rms_mm:.3f} mm/s, lo cual corresponde a: {severity_mm}.",
+                    f"La clasificación ISO vigente ubica la condición del activo como {severity_mm}.",
                     styles['Normal'],
                 )
             )
             if severity_entry_pdf and severity_entry_pdf not in findings_core_pdf:
                 elements.append(Paragraph(severity_entry_pdf, styles['Normal']))
             diag_items = findings_core_pdf or ["Sin anomalías evidentes según reglas actuales."]
-            bullet_items = [
+            diag_bullets = [
                 ListItem(Paragraph(text, styles['Normal']), bulletColor=accent_color)
                 for text in diag_items
             ]
             elements.append(
                 ListFlowable(
-                    bullet_items,
+                    diag_bullets,
                     bulletType='bullet',
                     bulletColor=accent_color,
                     start='bulletchar',
                     leftIndent=16,
                 )
             )
+            elements.append(Spacer(1, 12))
 
-            # Propiedades del equipo (al final)
             try:
                 def _tfv(tf):
                     try:
                         return str(tf.value).strip() if tf and getattr(tf, 'value', '') != '' else ''
                     except Exception:
                         return ''
+
                 props = []
-                # Rodamiento (modelo y geometría)
                 try:
                     model = getattr(self, 'bearing_model_dd', None).value if getattr(self, 'bearing_model_dd', None) else ''
                 except Exception:
@@ -2853,16 +3048,13 @@ class MainApp:
                 props.append(["d (mm)", _tfv(getattr(self, 'br_d_mm_field', None))])
                 props.append(["D (mm)", _tfv(getattr(self, 'br_D_mm_field', None))])
                 props.append(["Ángulo (°)", _tfv(getattr(self, 'br_theta_deg_field', None))])
-                # Máquina
                 props.append(["RPM", _tfv(getattr(self, 'rpm_hint_field', None))])
-                props.append(["Línea (Hz)", (getattr(self, 'line_freq_dd', None).value if getattr(self, 'line_freq_dd', None) else '')])
+                props.append(["Frecuencia de línea (Hz)", (getattr(self, 'line_freq_dd', None).value if getattr(self, 'line_freq_dd', None) else '')])
                 props.append(["Dientes engrane", _tfv(getattr(self, 'gear_teeth_field', None))])
-                # Frecuencias teóricas
                 props.append(["BPFO (Hz)", _tfv(getattr(self, 'bpfo_field', None))])
                 props.append(["BPFI (Hz)", _tfv(getattr(self, 'bpfi_field', None))])
                 props.append(["BSF (Hz)", _tfv(getattr(self, 'bsf_field', None))])
                 props.append(["FTF (Hz)", _tfv(getattr(self, 'ftf_field', None))])
-                # Sensor
                 try:
                     sens_type = getattr(self, 'sens_unit_dd', None).value if getattr(self, 'sens_unit_dd', None) else ''
                 except Exception:
@@ -2871,17 +3063,15 @@ class MainApp:
                     props.append(["Sensor", sens_type])
                 props.append(["Sensibilidad", _tfv(getattr(self, 'sensor_sens_field', None))])
                 props.append(["Ganancia (V/V)", _tfv(getattr(self, 'gain_field', None))])
-
                 props = [[k, v] for k, v in props if str(v) != '']
                 if props:
-                    elements.append(Spacer(1, 12))
-                    elements.append(Paragraph("Propiedades del equipo", styles['Heading2']))
-                    tbl_props = Table([["Propiedad", "Valor"]] + props, colWidths=[200, 200])
+                    elements.append(Paragraph("Datos de configuración del equipo", styles['SectionHeading']))
+                    tbl_props = Table([["Propiedad", "Valor"]] + props, colWidths=[usable_width * 0.45, usable_width * 0.55])
                     _apply_table_style(tbl_props)
                     elements.append(tbl_props)
+                    elements.append(Spacer(1, 12))
             except Exception:
                 pass
-
             if charlotte_catalog_pdf:
                 elements.append(PageBreak())
                 elements.append(Paragraph("Referencia Tabla de Charlotte (Motores eléctricos)", styles['SectionHeading']))
@@ -2891,7 +3081,7 @@ class MainApp:
                 if charlotte_table is not None:
                     elements.append(charlotte_table)
 
-            doc.build(elements)
+            doc.build(elements, onFirstPage=_first_page, onLaterPages=_later_pages)
 
             if not hasattr(self, "generated_reports"):
                 self.generated_reports = []
@@ -3852,10 +4042,9 @@ class MainApp:
 
 
 
+
             # Crear PDF
-
             doc = SimpleDocTemplate(pdf_path, pagesize=A4)
-
             styles = getSampleStyleSheet()
             try:
                 accent_hex = self._accent_hex()
@@ -3865,6 +4054,32 @@ class MainApp:
                 accent_color = colors.HexColor(accent_hex)
             except Exception:
                 accent_color = colors.HexColor("#1f77b4")
+
+            def _formalize_accent(col: colors.Color) -> colors.Color:
+                try:
+                    base_dark = colors.HexColor("#1b263b")
+                except Exception:
+                    base_dark = colors.HexColor("#1f2a44")
+                luma = 0.299 * col.red + 0.587 * col.green + 0.114 * col.blue
+                mix = 0.6 if luma <= 0.32 else 0.8
+                r = base_dark.red * mix + col.red * (1 - mix)
+                g = base_dark.green * mix + col.green * (1 - mix)
+                b = base_dark.blue * mix + col.blue * (1 - mix)
+                luma2 = 0.299 * r + 0.587 * g + 0.114 * b
+                if luma2 > 0.4:
+                    return base_dark
+                return colors.Color(r, g, b)
+
+            accent_color = _formalize_accent(accent_color)
+
+            def _blend_with_white(col: colors.Color, ratio: float) -> colors.Color:
+                ratio = min(max(ratio, 0.0), 1.0)
+                return colors.Color(
+                    col.red + (1.0 - col.red) * ratio,
+                    col.green + (1.0 - col.green) * ratio,
+                    col.blue + (1.0 - col.blue) * ratio,
+                )
+
             title_style = ParagraphStyle(
                 "title",
                 parent=styles['Title'],
@@ -3896,6 +4111,23 @@ class MainApp:
                     spaceAfter=4,
                 )
             )
+            styles.add(
+                ParagraphStyle(
+                    "Muted",
+                    parent=styles['Normal'],
+                    textColor=colors.HexColor("#7f8c8d"),
+                    fontSize=9,
+                )
+            )
+            styles.add(
+                ParagraphStyle(
+                    "KeyMetric",
+                    parent=styles['BodyText'],
+                    alignment=1,
+                    leading=14,
+                    spaceAfter=0,
+                )
+            )
 
             def _apply_table_style(tbl: Table) -> None:
                 tbl.setStyle(
@@ -3912,48 +4144,153 @@ class MainApp:
                     )
                 )
 
+            generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            usable_width = doc.width
+
+            def _draw_page_frame(canv, doc_obj, *, first: bool = False) -> None:
+                canv.saveState()
+                page_width, page_height = A4
+                top_bar_height = 18 * mm
+                bottom_bar_height = 10 * mm
+                watermark_color = _blend_with_white(accent_color, 0.5)
+                try:
+                    canv.setFillColor(watermark_color)
+                    try:
+                        canv.setFillAlpha(0.06)
+                    except Exception:
+                        pass
+                    canv.setFont("Helvetica-Bold", 52)
+                    canv.translate(page_width / 2.0, page_height / 2.0)
+                    canv.rotate(45)
+                    canv.drawCentredString(0, -16, "V-Analyzer")
+                    canv.translate(-page_width / 2.0, -page_height / 2.0)
+                    try:
+                        canv.setFillAlpha(1)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+                try:
+                    canv.setFillColor(accent_color)
+                    canv.rect(0, page_height - top_bar_height, page_width, top_bar_height, fill=1, stroke=0)
+                    canv.setFillColor(_blend_with_white(accent_color, 0.85))
+                    canv.rect(0, 0, page_width, bottom_bar_height, fill=1, stroke=0)
+                except Exception:
+                    pass
+
+                try:
+                    canv.setFillColor(colors.white)
+                    canv.setFont("Helvetica-Bold", 16)
+                    canv.drawString(24, page_height - top_bar_height + 6, "Informe de Vibraciones")
+                    canv.setFont("Helvetica", 9)
+                    canv.drawRightString(page_width - 24, page_height - top_bar_height + 6, generated_at)
+                except Exception:
+                    pass
+
+                try:
+                    canv.setFillColor(colors.HexColor("#34495e"))
+                    canv.setFont("Helvetica", 9)
+                    canv.drawString(24, bottom_bar_height / 2.0, f"Emitido con V-Analyzer {APP_VERSION}")
+                    canv.drawRightString(page_width - 24, bottom_bar_height / 2.0, f"Página {canv.getPageNumber()}")
+                except Exception:
+                    pass
+
+                canv.restoreState()
+
+            def _first_page(canv, doc_obj):
+                _draw_page_frame(canv, doc_obj, first=True)
+
+            def _later_pages(canv, doc_obj):
+                _draw_page_frame(canv, doc_obj, first=False)
+
             elements = []
-            # Cover page
             elements.append(Paragraph("Informe de Análisis de Vibraciones", title_style))
-            elements.append(Spacer(1, 18))
-            elements.append(Paragraph(f"Archivo analizado: {base_name}", styles['Normal']))
-            elements.append(Paragraph(f"Periodo analizado: {start_t:.2f}s - {end_t:.2f}s", styles['Normal']))
-            elements.append(Paragraph(f"Fecha de generacion: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
-            elements.append(Paragraph(f"Aplicacion: V-Analyzer {APP_VERSION}", styles['Normal']))
-            elements.append(Spacer(1, 18))
-            cover_summary = [
-                ["Indicador", "Valor"],
-                ["RMS velocidad", f"{rms_mm:.3f} mm/s"],
-                ["Clasificacion ISO", severity_mm],
-                ["Frecuencia dominante", f"{features_full['dom_freq']:.2f} Hz"],
-            ]
-            tbl_cover = Table(cover_summary, colWidths=[200, 200])
-            _apply_table_style(tbl_cover)
-            elements.append(tbl_cover)
-            elements.append(PageBreak())
-            # Resumen Ejecutivo
-            # Nota filtro visual (export): obtiene estado actual de la UI
+            elements.append(Paragraph("Reporte técnico ejecutivo", styles['Muted']))
+            elements.append(Spacer(1, 6))
+
+            info_table = Table(
+                [
+                    ["Archivo analizado", base_name],
+                    ["Periodo evaluado", f"{start_t:.2f}s – {end_t:.2f}s"],
+                    ["Fecha de emisión", generated_at],
+                    ["Aplicación", f"V-Analyzer {APP_VERSION}"],
+                ],
+                colWidths=[usable_width * 0.35, usable_width * 0.65],
+            )
+            info_table.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (0, -1), _blend_with_white(accent_color, 0.1)),
+                        ("TEXTCOLOR", (0, 0), (0, -1), colors.white),
+                        ("FONTNAME", (0, 0), (0, -1), 'Helvetica-Bold'),
+                        ("BACKGROUND", (1, 0), (1, -1), colors.HexColor("#f7f9fb")),
+                        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d0d7de")),
+                        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#d0d7de")),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                        ("TOPPADDING", (0, 0), (-1, -1), 6),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                    ]
+                )
+            )
+            elements.append(info_table)
+            elements.append(Spacer(1, 16))
+
             try:
-                _pdf_fc2 = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+                _pdf_fc = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
             except Exception:
-                _pdf_fc2 = 0.5
+                _pdf_fc = 0.5
             try:
-                _pdf_hide_lf2 = bool(getattr(self, 'hide_lf_cb', None).value)
+                _pdf_hide_lf = bool(getattr(self, 'hide_lf_cb', None).value)
             except Exception:
-                _pdf_hide_lf2 = True
-            _pdf_fft_filter_note2 = f"Filtro visual FFT: oculta < {_pdf_fc2:.2f} Hz" if _pdf_hide_lf2 else "Filtro visual FFT: sin ocultar"
+                _pdf_hide_lf = True
+            _pdf_fft_filter_note = f"Filtro visual FFT: oculta < {_pdf_fc:.2f} Hz" if _pdf_hide_lf else "Filtro visual FFT: sin ocultar"
 
             elements.append(Paragraph("Resumen Ejecutivo", styles['HeadingAccent']))
-            exec_findings_all2 = list(findings_core_pdf)
-            exec_findings = self._select_main_findings(exec_findings_all2)
+            exec_findings_all = list(findings_core_pdf)
+            exec_findings = self._select_main_findings(exec_findings_all)
             if not exec_findings:
-                exec_findings = ["Sin anomalias evidentes segun reglas actuales."]
-            elements.append(Paragraph(f"Clasificacion ISO: {severity_mm}", styles['Normal']))
-            elements.append(Paragraph(f"RMS velocidad: {rms_mm:.3f} mm/s", styles['Normal']))
-            elements.append(Paragraph(f"Frecuencia dominante: {features_full['dom_freq']:.2f} Hz", styles['Normal']))
-            elements.append(Paragraph(_pdf_fft_filter_note2, styles['Normal']))
-            elements.append(Spacer(1, 8))
-            elements.append(Paragraph("Diagnóstico:", styles['SectionHeading']))
+                exec_findings = ["Sin anomalías evidentes según reglas actuales."]
+
+            metric_cards = Table(
+                [
+                    [
+                        Paragraph(
+                            f"<font color='#7f8c8d' size=9>Clasificación ISO</font><br/><font size=16><b>{severity_mm}</b></font>",
+                            styles['KeyMetric'],
+                        ),
+                        Paragraph(
+                            f"<font color='#7f8c8d' size=9>RMS velocidad</font><br/><font size=16><b>{rms_mm:.3f} mm/s</b></font>",
+                            styles['KeyMetric'],
+                        ),
+                        Paragraph(
+                            f"<font color='#7f8c8d' size=9>Frecuencia dominante</font><br/><font size=16><b>{features_full['dom_freq']:.2f} Hz</b></font>",
+                            styles['KeyMetric'],
+                        ),
+                    ]
+                ],
+                colWidths=[usable_width / 3.0] * 3,
+            )
+            metric_cards.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, -1), _blend_with_white(accent_color, 0.85)),
+                        ("BOX", (0, 0), (-1, -1), 0.5, _blend_with_white(accent_color, 0.5)),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.5, _blend_with_white(accent_color, 0.5)),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                        ("TOPPADDING", (0, 0), (-1, -1), 8),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                    ]
+                )
+            )
+            elements.append(metric_cards)
+            elements.append(Spacer(1, 12))
+
             exec_bullets = [
                 ListItem(Paragraph(text, styles['Normal']), bulletColor=accent_color)
                 for text in exec_findings
@@ -3967,93 +4304,229 @@ class MainApp:
                     leftIndent=16,
                 )
             )
+            elements.append(Spacer(1, 6))
+            elements.append(Paragraph(_pdf_fft_filter_note, styles['Muted']))
+            elements.append(Spacer(1, 12))
 
+            try:
+                def _sev_index(lbl: str) -> int:
+                    s = (lbl or "").lower()
+                    if "buena" in s:
+                        return 0
+                    if "satisfact" in s:
+                        return 1
+                    if "insatisfact" in s:
+                        return 2
+                    if "inaceptable" in s:
+                        return 3
+                    return -1
 
-            elements.append(Paragraph("📊 Reporte de Análisis de Vibraciones", title_style))
+                cur_idx = _sev_index(severity_mm)
+                base = [
+                    ("Buena", "#2ecc71"),
+                    ("Satisfactoria", "#f1c40f"),
+                    ("Insatisfactoria", "#e67e22"),
+                    ("Inaceptable", "#e74c3c"),
+                ]
+
+                def _lighten_hex(hx: str, factor: float = 0.55) -> colors.Color:
+                    factor = min(max(factor, 0.0), 1.0)
+                    col = colors.HexColor(hx)
+                    r = col.red + (1 - col.red) * factor
+                    g = col.green + (1 - col.green) * factor
+                    b = col.blue + (1 - col.blue) * factor
+                    return colors.Color(r, g, b)
+
+                cells = []
+                labels = []
+                for name, hx in base:
+                    para = Paragraph(f"<b>{name}</b>", styles['Normal'])
+                    cells.append(para)
+                    labels.append(Paragraph("", styles['Normal']))
+                sem_tbl = Table([cells, labels], colWidths=[usable_width / 4.5] * 4)
+                ts = []
+                for i, (name, hx) in enumerate(base):
+                    if i == cur_idx:
+                        bg = colors.HexColor(hx)
+                    else:
+                        bg = _lighten_hex(hx, 0.65)
+                    ts.append(("BACKGROUND", (i, 0), (i, 0), bg))
+                    ts.append(("BOX", (i, 0), (i, 0), 0.5, colors.black))
+                    ts.append(("ALIGN", (i, 0), (i, 0), "CENTER"))
+                    ts.append(("ALIGN", (i, 1), (i, 1), "CENTER"))
+                ts.append(("GRID", (0, 1), (-1, 1), 0.25, colors.grey))
+                sem_tbl.setStyle(TableStyle(ts))
+                elements.append(Paragraph("Semáforo de severidad", styles['SectionHeading']))
+                elements.append(sem_tbl)
+                elements.append(Spacer(1, 12))
+            except Exception:
+                pass
+
+            exp_lines_pdf2 = self._build_explanations(res, exec_findings)
+            primary_recommendations = exp_lines_pdf2[:3]
+            extended_recommendations = exp_lines_pdf2[3:]
+            if primary_recommendations:
+                elements.append(Paragraph("Recomendaciones prioritarias", styles['SectionHeading']))
+                rec_bullets = [
+                    ListItem(Paragraph(text, styles['Normal']), bulletColor=accent_color)
+                    for text in primary_recommendations
+                ]
+                elements.append(
+                    ListFlowable(
+                        rec_bullets,
+                        bulletType='bullet',
+                        bulletColor=accent_color,
+                        start='bulletchar',
+                        leftIndent=16,
+                    )
+                )
+                elements.append(Spacer(1, 12))
+
+            elements.append(PageBreak())
+
+            elements.append(Paragraph("Reporte de Análisis de Vibraciones", title_style))
             elements.append(Paragraph(f"Archivo: {base_name}", styles['Normal']))
             elements.append(Paragraph(f"Periodo: {start_t:.2f}s – {end_t:.2f}s", styles['Normal']))
             elements.append(Spacer(1, 12))
 
-            # Resumen de métricas espectrales
-            # (resumen actualizado)
-            data_summary = [
-                ["Metrica", "Valor"],
-                ["RMS (velocidad)", f"{rms_mm:.3f} mm/s"],
-                ["Clasificacion ISO", severity_mm],
-                ["Frecuencia dominante", f"{features_full['dom_freq']:.2f} Hz"],
-                ["Crest factor (aceleracion)", f"{features_full['crest']:.2f}"]
-            ]
-            table_summary = Table(data_summary, colWidths=[200, 200])
-            elements.append(Paragraph("Metricas detalladas", styles['SectionHeading']))
-            det = [
-                ["Metrica", "Valor"],
-                ["RMS aceleracion (m/s^2)", f"{features_full['rms_time_acc']:.3e}"],
-                ["Pico aceleracion (m/s^2)", f"{features_full['peak_acc']:.3e}"],
-                ["Pico a pico (m/s^2)", f"{features_full['pp_acc']:.3e}"],
+            if extended_recommendations:
+                elements.append(Paragraph("Recomendaciones complementarias", styles['SectionHeading']))
+                extra_bullets = [
+                    ListItem(Paragraph(text, styles['Normal']), bulletColor=accent_color)
+                    for text in extended_recommendations
+                ]
+                elements.append(
+                    ListFlowable(
+                        extra_bullets,
+                        bulletType='bullet',
+                        bulletColor=accent_color,
+                        start='bulletchar',
+                        leftIndent=16,
+                    )
+                )
+                elements.append(Spacer(1, 12))
+
+            if top_peaks:
+                elements.append(Paragraph("Componentes espectrales destacados", styles['SectionHeading']))
+                peaks_data = [["Frecuencia (Hz)", "Amplitud (mm/s)", "Orden (X)"]]
+                for pf, pa, order in top_peaks:
+                    peaks_data.append([f"{pf:.2f}", f"{pa:.3f}", f"{order:.2f}" if order else "-"])
+                tbl_peaks = Table(peaks_data, colWidths=[usable_width * 0.28, usable_width * 0.36, usable_width * 0.28])
+                _apply_table_style(tbl_peaks)
+                elements.append(tbl_peaks)
+                elements.append(Spacer(1, 12))
+
+            analysis_details = [
+                ["RMS aceleración (m/s²)", f"{features_full['rms_time_acc']:.3e}"],
+                ["Pico aceleración (m/s²)", f"{features_full['peak_acc']:.3e}"],
+                ["Pico a pico (m/s²)", f"{features_full['pp_acc']:.3e}"],
                 ["Crest factor", f"{features_full['crest']:.2f}"],
-                ["Energia baja (0-30 Hz)", f"{(100.0*features_full['e_low']/max(features_full['e_total'],1e-12)):.1f}%"],
-                ["Energia media (30-120 Hz)", f"{(100.0*features_full['e_mid']/max(features_full['e_total'],1e-12)):.1f}%"],
-                ["Energia alta (>=120 Hz)", f"{(100.0*features_full['e_high']/max(features_full['e_total'],1e-12)):.1f}%"],
-                ["Relacion 2X", f"{features_full['r2x']:.2f}"],
-                ["Relacion 3X", f"{features_full['r3x']:.2f}"],
+                ["Energía baja (0-30 Hz)", f"{(100.0 * features_full['e_low'] / max(features_full['e_total'], 1e-12)):.1f}%"],
+                ["Energía media (30-120 Hz)", f"{(100.0 * features_full['e_mid'] / max(features_full['e_total'], 1e-12)):.1f}%"],
+                ["Energía alta (≥120 Hz)", f"{(100.0 * features_full['e_high'] / max(features_full['e_total'], 1e-12)):.1f}%"],
+                ["Relación 2X", f"{features_full['r2x']:.2f}"],
+                ["Relación 3X", f"{features_full['r3x']:.2f}"],
             ]
-            tbl_det = Table(det, colWidths=[220, 180])
-            _apply_table_style(tbl_det)
-            elements.append(tbl_det)
-            elements.append(Spacer(1, 12))
-            _apply_table_style(table_summary)
-            elements.append(table_summary)
+            tbl_analysis = Table([["Métrica", "Valor"]] + analysis_details, colWidths=[usable_width * 0.45, usable_width * 0.55])
+            _apply_table_style(tbl_analysis)
+            elements.append(tbl_analysis)
             elements.append(Spacer(1, 12))
 
+            elements.append(Paragraph("Visualizaciones clave", styles['SectionHeading']))
+            elements.append(Image(img_time, width=usable_width, height=150))
+            elements.append(Image(img_fft, width=usable_width, height=150))
 
-            # Gráficas principales
+            if img_env:
+                elements.append(Image(img_env, width=usable_width, height=150))
+            if img_runup:
+                elements.append(Paragraph("Arranque/Paro - Cascada 3D", styles['SectionHeading']))
+                elements.append(Image(img_runup, width=usable_width, height=180))
+            if img_orbit:
+                elements.append(Paragraph("Análisis de órbita", styles['SectionHeading']))
+                elements.append(Image(img_orbit, width=usable_width * 0.8, height=320))
 
-            elements.append(Image(img_time, width=400, height=150))
-
-            elements.append(Image(img_fft, width=400, height=150))
-
-
-
-            # Gráficas auxiliares
             if aux_imgs:
-                elements.append(Paragraph("Variables auxiliares", styles['Heading2']))
+                elements.append(Paragraph("Variables auxiliares", styles['SectionHeading']))
                 for img in aux_imgs:
-                    elements.append(Image(img, width=400, height=120))
-                # Tabla de métricas auxiliares
+                    elements.append(Image(img, width=usable_width, height=120))
                 aux_data = [["Variable", "Promedio", "Mínimo", "Máximo"]]
                 for col, _, _ in aux_selected:
                     vals = self.current_df[col].dropna().to_numpy()
                     if len(vals) > 0:
                         aux_data.append([col, f"{np.mean(vals):.2f}", f"{np.min(vals):.2f}", f"{np.max(vals):.2f}"])
                 if len(aux_data) > 1:
-                    aux_table = Table(aux_data, colWidths=[150, 100, 100, 100])
+                    aux_table = Table(aux_data, colWidths=[usable_width * 0.4, usable_width * 0.2, usable_width * 0.2, usable_width * 0.2])
                     _apply_table_style(aux_table)
                     elements.append(aux_table)
+
             elements.append(Spacer(1, 12))
-            elements.append(Paragraph("Diagnóstico", styles['SectionHeading']))
+            elements.append(Paragraph("Diagnóstico técnico", styles['SectionHeading']))
             elements.append(
                 Paragraph(
-                    f"El valor RMS calculado es {rms_mm:.3f} mm/s, lo cual corresponde a: {severity_mm}.",
+                    f"La clasificación ISO vigente ubica la condición del activo como {severity_mm}.",
                     styles['Normal'],
                 )
             )
             if severity_entry_pdf and severity_entry_pdf not in findings_core_pdf:
                 elements.append(Paragraph(severity_entry_pdf, styles['Normal']))
             diag_items = findings_core_pdf or ["Sin anomalías evidentes según reglas actuales."]
-            bullet_items = [
+            diag_bullets = [
                 ListItem(Paragraph(text, styles['Normal']), bulletColor=accent_color)
                 for text in diag_items
             ]
             elements.append(
                 ListFlowable(
-                    bullet_items,
+                    diag_bullets,
                     bulletType='bullet',
                     bulletColor=accent_color,
                     start='bulletchar',
                     leftIndent=16,
                 )
             )
+            elements.append(Spacer(1, 12))
 
+            try:
+                def _tfv(tf):
+                    try:
+                        return str(tf.value).strip() if tf and getattr(tf, 'value', '') != '' else ''
+                    except Exception:
+                        return ''
+
+                props = []
+                try:
+                    model = getattr(self, 'bearing_model_dd', None).value if getattr(self, 'bearing_model_dd', None) else ''
+                except Exception:
+                    model = ''
+                if model:
+                    props.append(["Rodamiento (modelo)", model])
+                props.append(["Elementos (n)", _tfv(getattr(self, 'br_n_field', None))])
+                props.append(["d (mm)", _tfv(getattr(self, 'br_d_mm_field', None))])
+                props.append(["D (mm)", _tfv(getattr(self, 'br_D_mm_field', None))])
+                props.append(["Ángulo (°)", _tfv(getattr(self, 'br_theta_deg_field', None))])
+                props.append(["RPM", _tfv(getattr(self, 'rpm_hint_field', None))])
+                props.append(["Frecuencia de línea (Hz)", (getattr(self, 'line_freq_dd', None).value if getattr(self, 'line_freq_dd', None) else '')])
+                props.append(["Dientes engrane", _tfv(getattr(self, 'gear_teeth_field', None))])
+                props.append(["BPFO (Hz)", _tfv(getattr(self, 'bpfo_field', None))])
+                props.append(["BPFI (Hz)", _tfv(getattr(self, 'bpfi_field', None))])
+                props.append(["BSF (Hz)", _tfv(getattr(self, 'bsf_field', None))])
+                props.append(["FTF (Hz)", _tfv(getattr(self, 'ftf_field', None))])
+                try:
+                    sens_type = getattr(self, 'sens_unit_dd', None).value if getattr(self, 'sens_unit_dd', None) else ''
+                except Exception:
+                    sens_type = ''
+                if sens_type:
+                    props.append(["Sensor", sens_type])
+                props.append(["Sensibilidad", _tfv(getattr(self, 'sensor_sens_field', None))])
+                props.append(["Ganancia (V/V)", _tfv(getattr(self, 'gain_field', None))])
+                props = [[k, v] for k, v in props if str(v) != '']
+                if props:
+                    elements.append(Paragraph("Datos de configuración del equipo", styles['SectionHeading']))
+                    tbl_props = Table([["Propiedad", "Valor"]] + props, colWidths=[usable_width * 0.45, usable_width * 0.55])
+                    _apply_table_style(tbl_props)
+                    elements.append(tbl_props)
+                    elements.append(Spacer(1, 12))
+            except Exception:
+                pass
             if charlotte_catalog_pdf:
                 elements.append(PageBreak())
                 elements.append(Paragraph("Referencia Tabla de Charlotte (Motores eléctricos)", styles['SectionHeading']))
@@ -4063,7 +4536,7 @@ class MainApp:
                 if charlotte_table is not None:
                     elements.append(charlotte_table)
 
-            doc.build(elements)
+            doc.build(elements, onFirstPage=_first_page, onLaterPages=_later_pages)
 
 
 
@@ -4255,7 +4728,7 @@ class MainApp:
                 ], spacing=10, wrap=True),
                 ft.Row([ft.ElevatedButton("Calcular frecuencias", icon=ft.Icons.FUNCTIONS, on_click=self._compute_bearing_freqs_click)], alignment="start")
             ], spacing=8),
-            visible=False,
+            visible=(self.analysis_mode == "assist"),
         )
 
 
@@ -4491,109 +4964,124 @@ class MainApp:
 
         self.config_expanded = True
 
-        self.config_container = ft.Container(
-
-            content=ft.Column([
-
-                # Fila tiempo y FFT
-
+        general_settings = ft.Column(
+            [
+                ft.Text("Columnas base", size=14, weight="bold"),
                 ft.Row([self.time_dropdown, self.fft_dropdown], spacing=10),
-
-                # Unidad para la señal en tiempo
+                ft.Text("Unidades y colores", size=14, weight="bold"),
                 ft.Row([self.time_unit_dd], spacing=10),
-                ft.Text('Colores de graficas:', size=14),
-
                 ft.Row([self.time_color_dd, self.fft_color_dd], spacing=10),
+            ],
+            spacing=12,
+            tight=True,
+        )
 
-
-
-
-                # Señales
-
-                ft.Text("📊 Señales en tiempo:", size=14),
-
+        signal_settings = ft.Column(
+            [
+                ft.Text("📊 Señales en tiempo", size=14, weight="bold"),
                 ft.Row(self.signal_checkboxes, wrap=True, spacing=10),
                 self.combine_signals_cb,
-
-
-
-
-                # Auxiliares
-
-                ft.Text("📌 Variables auxiliares:", size=14),
-
+                ft.Text("📌 Variables auxiliares", size=14, weight="bold"),
                 ft.Column([
-
                     ft.Row([cb, color_dd, style_dd], spacing=10)
-
                     for cb, color_dd, style_dd in self.aux_controls
+                ], spacing=6),
+            ],
+            spacing=12,
+            tight=True,
+        )
 
-                ], spacing=5),
-
-
-
-                # Periodo
-
-                ft.Text("⏱️ Periodo de análisis:", size=14),
-
+        spectrum_settings = ft.Column(
+            [
+                ft.Text("⏱️ Periodo de análisis", size=14, weight="bold"),
                 ft.Row([self.start_time_field, self.end_time_field], spacing=10),
-
-                # Opciones de espectro (visual)
-                ft.Text("Opciones de espectro (visual):", size=14),
+                ft.Text("Opciones de espectro", size=14, weight="bold"),
                 ft.Row([self.hide_lf_cb, self.lf_cutoff_field, self.hf_limit_field, self.runup_3d_cb], spacing=10, wrap=True),
                 ft.Row([self.orbit_cb, self.orbit_x_dd, self.orbit_y_dd], spacing=10, wrap=True),
                 ft.Column([self.fft_zoom_text, self.fft_zoom_slider], spacing=4),
-                ft.Row([self.db_scale_cb, self.sens_unit_dd, self.sensor_sens_field, self.gain_field], spacing=10),
-                ft.Row([self.db_ref_field, self.db_ymin_field, self.db_ymax_field], spacing=10),
+                ft.Text("Escala y calibración", size=14, weight="bold"),
+                ft.Row([self.db_scale_cb, self.sens_unit_dd, self.sensor_sens_field, self.gain_field], spacing=10, wrap=True),
+                ft.Row([self.db_ref_field, self.db_ymin_field, self.db_ymax_field], spacing=10, wrap=True),
+            ],
+            spacing=12,
+            tight=True,
+        )
 
-                # Parámetros de máquina (opcionales)
-                ft.Text("Parámetros de máquina (opcionales):", size=14),
-                ft.Row([self.analysis_mode_dd, self.rpm_hint_field, self.line_freq_dd, self.gear_teeth_field, ft.OutlinedButton("Rodamientos", icon=ft.Icons.LIST_ALT_ROUNDED, on_click=self._goto_bearings_view)], spacing=10, wrap=True),
+        diagnosis_settings = ft.Column(
+            [
+                ft.Text("Parámetros de máquina", size=14, weight="bold"),
+                ft.Row([
+                    self.analysis_mode_dd,
+                    self.rpm_hint_field,
+                    self.line_freq_dd,
+                    self.gear_teeth_field,
+                    ft.OutlinedButton("Rodamientos", icon=ft.Icons.LIST_ALT_ROUNDED, on_click=self._goto_bearings_view),
+                ], spacing=10, wrap=True),
                 self.assisted_box,
                 ft.Row([self.bpfo_field, self.bpfi_field, self.bsf_field, self.ftf_field], spacing=10, wrap=True),
+            ],
+            spacing=12,
+            tight=True,
+        )
 
+        config_tab_wrappers = {
+            "inputs": ft.Container(content=general_settings, padding=10),
+            "signals": ft.Container(content=signal_settings, padding=10),
+            "spectrum": ft.Container(content=spectrum_settings, padding=10),
+            "diagnostics": ft.Container(content=diagnosis_settings, padding=10),
+        }
 
+        tab_definitions = [
+            ("inputs", "Entradas", ft.Icons.TUNE_ROUNDED),
+            ("signals", "Señales", ft.Icons.SHOW_CHART_ROUNDED),
+            ("spectrum", "Espectro", ft.Icons.GRAPHIC_EQ_ROUNDED),
+            ("diagnostics", "Diagnóstico", ft.Icons.MEDICAL_SERVICES_ROUNDED),
+        ]
 
-                # Botones
+        self.config_tab_views = config_tab_wrappers
+        self.config_tab_keys = [key for key, *_ in tab_definitions]
+        self.active_config_tab = self.config_tab_keys[0]
 
-                ft.Row(
+        self.config_tabs = ft.Tabs(
+            animation_duration=250,
+            selected_index=0,
+            tabs=[ft.Tab(text=label, icon=icon) for key, label, icon in tab_definitions],
+            on_change=self._on_config_tab_change,
+        )
 
-                    alignment="center",
+        self.config_tab_body = ft.Container(
+            content=self.config_tab_views[self.active_config_tab],
+            padding=ft.padding.only(top=6),
+        )
 
-                    spacing=20,
+        action_buttons = ft.Row(
+            alignment="center",
+            spacing=20,
+            controls=[
+                ft.ElevatedButton(
+                    "Generar",
+                    icon=ft.Icons.ANALYTICS_ROUNDED,
+                    on_click=self._update_analysis,
+                    style=ft.ButtonStyle(bgcolor=self._accent_ui(), color="white"),
+                ),
+                ft.OutlinedButton(
+                    "Exportar",
+                    icon=ft.Icons.DOWNLOAD_ROUNDED,
+                    on_click=self.exportar_pdf,
+                ),
+            ],
+        )
 
-                    controls=[
-
-                        ft.ElevatedButton(
-
-                            "Generar",
-
-                            icon=ft.Icons.ANALYTICS_ROUNDED,
-
-                            on_click=self._update_analysis,
-
-                            style=ft.ButtonStyle(bgcolor=self._accent_ui(), color="white")
-
-                        ),
-
-                        ft.OutlinedButton(
-
-                            "Exportar",
-
-                            icon=ft.Icons.DOWNLOAD_ROUNDED,
-
-                            on_click=self.exportar_pdf
-
-                        )
-
-                    ]
-
-                )
-
-            ], spacing=15),
-
-            visible=self.config_expanded
-
+        self.config_container = ft.Container(
+            content=ft.Column(
+                [
+                    self.config_tabs,
+                    self.config_tab_body,
+                    action_buttons,
+                ],
+                spacing=16,
+            ),
+            visible=self.config_expanded,
         )
 
 
