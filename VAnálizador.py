@@ -41,6 +41,10 @@ APP_VERSION = "v1.0.0"
 # Escala de conversión de cuentas del acelerómetro a m/s² (rango ±16 g, 16 bits)
 MOTOR_ACC_SCALE = 9.81 * 16 / 32768
 
+# Banda recomendada para integración de velocidad (según checklist RMS)
+DEFAULT_VEL_HP_HZ = 10.0
+DEFAULT_VEL_LP_HZ = 1000.0
+
 # Conjunto de fallas consideradas en la Tabla de Charlotte para motores eléctricos.
 # Cada entrada incluye un identificador, el nombre de la falla y una descripción breve
 # para contextualizar al usuario durante la interpretación del diagnóstico automático.
@@ -452,6 +456,7 @@ def analyze_vibration(
     rpm: Optional[float] = None,
     line_freq_hz: Optional[float] = None,
     vel_hp_hz: Optional[float] = None,
+    vel_lp_hz: Optional[float] = None,
     bpfo_hz: Optional[float] = None,
     bpfi_hz: Optional[float] = None,
     bsf_hz: Optional[float] = None,
@@ -495,6 +500,7 @@ def analyze_vibration(
         y: np.ndarray,
         dt: float,
         hp_cut_hz: Optional[float] = None,
+        lp_cut_hz: Optional[float] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
         """
         Calcula espectro de aceleración y velocidad (mm/s) usando rFFT con ventana Hann
@@ -522,16 +528,27 @@ def analyze_vibration(
         pos = xf > 0
         mag_vel[pos] = mag_acc[pos] / (2.0 * np.pi * xf[pos])  # m/s
 
-        hp_mask = None
+        mask_kill = np.zeros_like(xf, dtype=bool)
         if hp_cut_hz is not None:
             try:
                 cutoff = float(hp_cut_hz)
             except Exception:
                 cutoff = 0.0
             if np.isfinite(cutoff) and cutoff > 0.0:
-                hp_mask = pos & (xf < cutoff)
-                if np.any(hp_mask):
-                    mag_vel[hp_mask] = 0.0
+                mask_kill |= xf < cutoff
+        if lp_cut_hz is not None:
+            try:
+                hi_cut = float(lp_cut_hz)
+            except Exception:
+                hi_cut = 0.0
+            if np.isfinite(hi_cut) and hi_cut > 0.0:
+                mask_kill |= xf > hi_cut
+
+        if np.any(mask_kill):
+            mag_acc = mag_acc.copy()
+            mag_vel = mag_vel.copy()
+            mag_acc[mask_kill] = 0.0
+            mag_vel[mask_kill] = 0.0
 
         mag_vel_mm = mag_vel * 1000.0
 
@@ -540,8 +557,8 @@ def analyze_vibration(
         V = np.zeros_like(Y, dtype=complex)
         pos_idx = xf > 0
         V[pos_idx] = Y[pos_idx] / (1j * 2.0 * np.pi * xf[pos_idx])
-        if hp_mask is not None and np.any(hp_mask):
-            V[hp_mask] = 0.0
+        if np.any(mask_kill):
+            V[mask_kill] = 0.0
         V[0] = 0.0
         v_t = np.fft.irfft(V, n=N)
         rms_vel_time_mm = 1000.0 * float(np.sqrt(np.mean(v_t**2)))
@@ -669,25 +686,51 @@ def analyze_vibration(
     except Exception:
         trend = np.full_like(a, float(np.mean(a)))
     a_proc = a - trend
-    hp_cut = None
+    hp_cut: Optional[float]
     try:
         if vel_hp_hz is None:
-            hp_cut = 0.5
+            hp_cut = DEFAULT_VEL_HP_HZ
         else:
             hp_candidate = float(vel_hp_hz)
             if np.isfinite(hp_candidate) and hp_candidate > 0.0:
                 hp_cut = hp_candidate
+            else:
+                hp_cut = DEFAULT_VEL_HP_HZ
     except Exception:
-        hp_cut = 0.5 if vel_hp_hz is None else None
+        hp_cut = DEFAULT_VEL_HP_HZ
+
+    nyq = (0.5 / dt) if (dt and dt > 0) else None
+    if nyq is not None and nyq > 0 and hp_cut is not None and hp_cut >= nyq:
+        hp_cut = 0.9 * nyq
+        if hp_cut <= 0:
+            hp_cut = None
+    lp_cut: Optional[float] = None
+    try:
+        if vel_lp_hz is not None:
+            lp_candidate = float(vel_lp_hz)
+            if np.isfinite(lp_candidate) and lp_candidate > 0.0:
+                lp_cut = lp_candidate
+    except Exception:
+        lp_cut = None
+    if lp_cut is None and nyq is not None and nyq > 0:
+        lp_cut = min(DEFAULT_VEL_LP_HZ, nyq)
+    if hp_cut is not None and lp_cut is not None and lp_cut <= hp_cut:
+        lp_cut = None
+
     df = fs / len(a) if fs > 0 and len(a) > 0 else 0.0
-    xf, mag_acc, mag_vel_mm, rms_vel_time_mm = _acc_fft_to_vel_mm_s(a_proc, dt, hp_cut)
+    xf, mag_acc, mag_vel_mm, rms_vel_time_mm = _acc_fft_to_vel_mm_s(a_proc, dt, hp_cut, lp_cut)
     # RMS de aceleración sin DC/tendencia
     rms_time_acc = float(np.sqrt(np.mean(a_proc**2))) if len(a_proc) else 0.0
     peak_acc = float(np.max(np.abs(a))) if len(a) else 0.0
     pp_acc = float(np.ptp(a)) if len(a) else 0.0
     if len(mag_vel_mm) > 0:
-        # Dominante ignorando muy baja frecuencia para evitar sesgos visuales
-        dom_min_hz = 0.5
+        # Dominante ignorando bandas filtradas para evitar sesgos visuales
+        try:
+            dom_min_hz = float(hp_cut) if hp_cut is not None else DEFAULT_VEL_HP_HZ
+        except Exception:
+            dom_min_hz = DEFAULT_VEL_HP_HZ
+        if dom_min_hz < 0:
+            dom_min_hz = 0.0
         mask_dom = xf >= dom_min_hz
         if np.any(mask_dom):
             rel_idx = int(np.argmax(mag_vel_mm[mask_dom]))
@@ -710,7 +753,13 @@ def analyze_vibration(
         e_high = float(np.sum((mag_vel_mm[(xf >= 120.0)]**2))) if np.any(xf >= 120) else 0.0
     else:
         e_total = 1e-12; e_low = e_mid = e_high = 0.0
-    peaks_fft = _find_top_peaks(xf, mag_vel_mm, k=top_k_peaks, min_freq=0.5, snr_db=min_snr_db)
+    peaks_fft = _find_top_peaks(
+        xf,
+        mag_vel_mm,
+        k=top_k_peaks,
+        min_freq=DEFAULT_VEL_HP_HZ,
+        snr_db=min_snr_db,
+    )
     # Envolvente: opcionalmente aplicar band-pass previo
     a_env_src = a_proc
     try:
@@ -894,6 +943,7 @@ def analyze_vibration(
             "r2x": r2x,
             "r3x": r3x,
             "energy": {"low": e_low, "mid": e_mid, "high": e_high, "total": e_total},
+            "band_limits_hz": {"hp": hp_cut, "lp": lp_cut},
         },
         "envelope": {
             "f_hz": xf_env,
@@ -2259,15 +2309,20 @@ class MainApp:
             except Exception:
                 _fmax_pre = None
             try:
-                _vel_hp = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+                _vel_hp = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else DEFAULT_VEL_HP_HZ
             except Exception:
-                _vel_hp = 0.5
+                _vel_hp = DEFAULT_VEL_HP_HZ
+            try:
+                _vel_lp = float(self.hf_limit_field.value) if getattr(self, 'hf_limit_field', None) and getattr(self.hf_limit_field, 'value', '') else DEFAULT_VEL_LP_HZ
+            except Exception:
+                _vel_lp = DEFAULT_VEL_LP_HZ
             res = analyze_vibration(
                 t_seg,
                 sig_seg,
                 rpm=rpm_val,
                 line_freq_hz=line_val,
                 vel_hp_hz=_vel_hp,
+                vel_lp_hz=_vel_lp,
                 bpfo_hz=self._fldf(getattr(self, 'bpfo_field', None)),
                 bpfi_hz=self._fldf(getattr(self, 'bpfi_field', None)),
                 bsf_hz=self._fldf(getattr(self, 'bsf_field', None)),
@@ -2316,15 +2371,20 @@ class MainApp:
             except Exception:
                 _fmax_pre = None
             try:
-                _vel_hp = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+                _vel_hp = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else DEFAULT_VEL_HP_HZ
             except Exception:
-                _vel_hp = 0.5
+                _vel_hp = DEFAULT_VEL_HP_HZ
+            try:
+                _vel_lp = float(self.hf_limit_field.value) if getattr(self, 'hf_limit_field', None) and getattr(self.hf_limit_field, 'value', '') else DEFAULT_VEL_LP_HZ
+            except Exception:
+                _vel_lp = DEFAULT_VEL_LP_HZ
             res = analyze_vibration(
                 t_seg,
                 sig_seg,
                 rpm=rpm_val,
                 line_freq_hz=line_val,
                 vel_hp_hz=_vel_hp,
+                vel_lp_hz=_vel_lp,
                 bpfo_hz=self._fldf(getattr(self, 'bpfo_field', None)),
                 bpfi_hz=self._fldf(getattr(self, 'bpfi_field', None)),
                 bsf_hz=self._fldf(getattr(self, 'bsf_field', None)),
@@ -2394,9 +2454,9 @@ class MainApp:
             img_time = save_plot(fig1)
 
             try:
-                fc = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+                fc = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else DEFAULT_VEL_HP_HZ
             except Exception:
-                fc = 0.5
+                fc = DEFAULT_VEL_HP_HZ
             try:
                 hide_lf = bool(getattr(self, 'hide_lf_cb', None).value)
             except Exception:
@@ -2429,7 +2489,7 @@ class MainApp:
                 ax2.plot(xpdf, ypdf, color=self.fft_plot_color, linewidth=1.6)
                 try:
                     K = 5
-                    min_freq = (max(0.5, fc) if hide_lf else 0.5)
+                    min_freq = (max(DEFAULT_VEL_HP_HZ, fc) if hide_lf else DEFAULT_VEL_HP_HZ)
                     mask = xf >= min_freq
                     if zmin is not None:
                         mask &= (xf >= zmin) & (xf <= zmax)
@@ -2743,9 +2803,9 @@ class MainApp:
 
             # Nota filtro visual (export): obtiene estado actual de la UI
             try:
-                _pdf_fc = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+                _pdf_fc = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else DEFAULT_VEL_HP_HZ
             except Exception:
-                _pdf_fc = 0.5
+                _pdf_fc = DEFAULT_VEL_HP_HZ
             try:
                 _pdf_hide_lf = bool(getattr(self, 'hide_lf_cb', None).value)
             except Exception:
@@ -4021,9 +4081,9 @@ class MainApp:
             # Resumen Ejecutivo
             # Nota filtro visual (export): obtiene estado actual de la UI
             try:
-                _pdf_fc2 = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+                _pdf_fc2 = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else DEFAULT_VEL_HP_HZ
             except Exception:
-                _pdf_fc2 = 0.5
+                _pdf_fc2 = DEFAULT_VEL_HP_HZ
             try:
                 _pdf_hide_lf2 = bool(getattr(self, 'hide_lf_cb', None).value)
             except Exception:
@@ -4475,7 +4535,7 @@ class MainApp:
 
         # Opciones visuales de frecuencias en FFT
         self.hide_lf_cb = ft.Checkbox(label="Ocultar bajas frecuencias", value=True)
-        self.lf_cutoff_field = ft.TextField(label="Corte LF (Hz)", value="0.5", width=100)
+        self.lf_cutoff_field = ft.TextField(label="Corte LF (Hz)", value="10", width=100)
         self.hf_limit_field = ft.TextField(label="Máx FFT (Hz)", value="", width=120)
         orbit_options = [ft.dropdown.Option(col) for col in available_signals]
         default_orbit_x = (
@@ -4853,9 +4913,18 @@ class MainApp:
 
     def _calculate_rms(self, signal):
         """
-        Calcula el valor RMS de una señal en el dominio del tiempo.
+        Calcula el valor RMS (AC) de una señal en el dominio del tiempo
+        eliminando el componente DC antes de integrar.
         """
-        return np.sqrt(np.mean(signal**2))
+        arr = np.asarray(signal, dtype=float).ravel()
+        if arr.size == 0:
+            return 0.0
+        finite = np.isfinite(arr)
+        if not np.any(finite):
+            return 0.0
+        arr = arr[finite]
+        arr = arr - np.mean(arr)
+        return float(np.sqrt(np.mean(arr**2)))
 
     def _format_peak_label(self, freq_hz: float, amp_mm_s: float, order: float | None = None, unit: str = "mm/s") -> str:
         label = f"{freq_hz:.2f} Hz | {amp_mm_s:.3f} {unit}"
@@ -5508,7 +5577,13 @@ class MainApp:
 
         return lines
 
-    def _acc_to_vel_time_mm(self, acc: np.ndarray, t: np.ndarray, hp_cut_hz: Optional[float] = None) -> np.ndarray:
+    def _acc_to_vel_time_mm(
+        self,
+        acc: np.ndarray,
+        t: np.ndarray,
+        hp_cut_hz: Optional[float] = None,
+        lp_cut_hz: Optional[float] = None,
+    ) -> np.ndarray:
         """
         Integra aceleración en el dominio de la frecuencia para obtener velocidad en el tiempo (mm/s).
         - Usa rFFT, divide por j*2*pi*f (f>0), fuerza DC=0 para evitar deriva y hace irFFT.
@@ -5520,21 +5595,35 @@ class MainApp:
         dt = float(np.median(np.diff(t)))
         if not np.isfinite(dt) or dt <= 0:
             return np.asarray([], dtype=float)
+        finite = np.isfinite(acc)
+        if not np.any(finite):
+            return np.asarray([], dtype=float)
+        acc = acc.copy()
+        acc[~finite] = np.nanmean(acc[finite])
+        acc = acc - np.mean(acc)
         N = acc.size
         Af = np.fft.rfft(acc)
         xf = np.fft.rfftfreq(N, dt)
         V = np.zeros_like(Af, dtype=complex)
         pos = xf > 0
         V[pos] = Af[pos] / (1j * 2.0 * np.pi * xf[pos])
+        mask_kill = np.zeros_like(xf, dtype=bool)
         if hp_cut_hz is not None:
             try:
                 cutoff = float(hp_cut_hz)
             except Exception:
                 cutoff = 0.0
             if np.isfinite(cutoff) and cutoff > 0.0:
-                hp_mask = pos & (xf < cutoff)
-                if np.any(hp_mask):
-                    V[hp_mask] = 0.0
+                mask_kill |= xf < cutoff
+        if lp_cut_hz is not None:
+            try:
+                lp_val = float(lp_cut_hz)
+            except Exception:
+                lp_val = 0.0
+            if np.isfinite(lp_val) and lp_val > 0.0:
+                mask_kill |= xf > lp_val
+        if np.any(mask_kill):
+            V[mask_kill] = 0.0
         V[0] = 0.0
         v_t = np.fft.irfft(V, n=N)
         return 1000.0 * v_t  # mm/s
@@ -5960,15 +6049,20 @@ class MainApp:
             except Exception:
                 _fmax_pre = None
             try:
-                _vel_hp = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+                _vel_hp = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else DEFAULT_VEL_HP_HZ
             except Exception:
-                _vel_hp = 0.5
+                _vel_hp = DEFAULT_VEL_HP_HZ
+            try:
+                _vel_lp = float(self.hf_limit_field.value) if getattr(self, 'hf_limit_field', None) and getattr(self.hf_limit_field, 'value', '') else DEFAULT_VEL_LP_HZ
+            except Exception:
+                _vel_lp = DEFAULT_VEL_LP_HZ
             res = analyze_vibration(
                 t_segment,
                 signal_segment,
                 rpm=rpm_val,
                 line_freq_hz=line_val,
                 vel_hp_hz=_vel_hp,
+                vel_lp_hz=_vel_lp,
                 bpfo_hz=self._fldf(getattr(self, 'bpfo_field', None)),
                 bpfi_hz=self._fldf(getattr(self, 'bpfi_field', None)),
                 bsf_hz=self._fldf(getattr(self, 'bsf_field', None)),
@@ -6091,11 +6185,15 @@ class MainApp:
             except Exception:
                 unit_mode = "vel_mm"
             try:
-                vel_hp_ui = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+                vel_hp_ui = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else DEFAULT_VEL_HP_HZ
             except Exception:
-                vel_hp_ui = 0.5
+                vel_hp_ui = DEFAULT_VEL_HP_HZ
+            try:
+                vel_lp_ui = float(self.hf_limit_field.value) if getattr(self, 'hf_limit_field', None) and getattr(self.hf_limit_field, 'value', '') else DEFAULT_VEL_LP_HZ
+            except Exception:
+                vel_lp_ui = DEFAULT_VEL_LP_HZ
             if unit_mode == "vel_mm":
-                _y_time = self._acc_to_vel_time_mm(signal_segment, t_segment, vel_hp_ui)
+                _y_time = self._acc_to_vel_time_mm(signal_segment, t_segment, vel_hp_ui, vel_lp_ui)
                 _ylabel = "Velocidad [mm/s]"
                 _rms_text = f"RMS vel: {self._calculate_rms(_y_time):.3f} mm/s" if _y_time.size else "RMS vel: 0.000 mm/s"
             elif unit_mode == "acc_g":
@@ -6129,9 +6227,9 @@ class MainApp:
 
             # Aplicar filtros visuales de frecuencia (LF y/o límite HF)
             try:
-                fc = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+                fc = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else DEFAULT_VEL_HP_HZ
             except Exception:
-                fc = 0.5
+                fc = DEFAULT_VEL_HP_HZ
             try:
                 fmax_ui = float(self.hf_limit_field.value) if getattr(self, 'hf_limit_field', None) and getattr(self.hf_limit_field, 'value', '') else None
             except Exception:
@@ -6238,7 +6336,7 @@ class MainApp:
             # Marcar picos principales (Top-N)
             try:
                 K = 5
-                min_freq = (max(0.5, fc) if hide_lf else 0.5)
+                min_freq = (max(DEFAULT_VEL_HP_HZ, fc) if hide_lf else DEFAULT_VEL_HP_HZ)
                 if xf is not None and mag_vel_mm is not None:
                     mask = xf >= min_freq
                     if zmin is not None:
@@ -6556,9 +6654,9 @@ class MainApp:
 
             # Nota de filtro visual FFT para mayor precisión en la interpretación
             try:
-                _fc = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
+                _fc = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else DEFAULT_VEL_HP_HZ
             except Exception:
-                _fc = 0.5
+                _fc = DEFAULT_VEL_HP_HZ
             try:
                 _hide_lf = bool(getattr(self, 'hide_lf_cb', None).value)
             except Exception:
