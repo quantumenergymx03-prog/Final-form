@@ -38,6 +38,9 @@ import shutil
 
 APP_VERSION = "v1.0.0"
 
+# Escala de conversión de cuentas del acelerómetro a m/s² (rango ±16 g, 16 bits)
+MOTOR_ACC_SCALE = 9.81 * 16 / 32768
+
 # Conjunto de fallas consideradas en la Tabla de Charlotte para motores eléctricos.
 # Cada entrada incluye un identificador, el nombre de la falla y una descripción breve
 # para contextualizar al usuario durante la interpretación del diagnóstico automático.
@@ -7627,6 +7630,11 @@ class MainApp:
             acc_y = y_series.loc[valid_mask].to_numpy(dtype=float)
             acc_z = z_series.loc[valid_mask].to_numpy(dtype=float)
 
+            # Convertir las lecturas crudas del acelerómetro a m/s² usando el factor del sensor
+            acc_x *= MOTOR_ACC_SCALE
+            acc_y *= MOTOR_ACC_SCALE
+            acc_z *= MOTOR_ACC_SCALE
+
             if t_raw.size < 2:
                 return work_df, message
 
@@ -7678,7 +7686,8 @@ class MainApp:
                 else ""
             )
             message = (
-                f"Datos de motor detectados ({units}). Se agregó la columna '{time_col_name}' en segundos." + freq_msg
+                f"Datos de motor detectados ({units}). Se agregó la columna '{time_col_name}' en segundos"
+                f" y las aceleraciones se escalaron a m/s²." + freq_msg
             )
 
             return work_df, message
