@@ -7667,7 +7667,21 @@ class MainApp:
                 time_col_name = f"time_seconds_{counter}"
             work_df.insert(0, time_col_name, t_seconds)
 
-            work_df[ts_col] = t_raw
+            # Conservar la columna original para referencia y convertir la principal a segundos
+            raw_units_suffix = {
+                "μs": "microsegundos",
+                "ms": "milisegundos",
+                "s": "segundos_original",
+            }.get(units, "original")
+
+            raw_col_name = f"{ts_col}_{raw_units_suffix}"
+            raw_counter = 1
+            while raw_col_name in work_df.columns:
+                raw_counter += 1
+                raw_col_name = f"{ts_col}_{raw_units_suffix}_{raw_counter}"
+            work_df.insert(1, raw_col_name, t_raw)
+
+            work_df[ts_col] = t_seconds
             work_df[x_col] = acc_x
             work_df[y_col] = acc_y
             work_df[z_col] = acc_z
@@ -7686,8 +7700,13 @@ class MainApp:
                 else ""
             )
             message = (
-                f"Datos de motor detectados ({units}). Se agregó la columna '{time_col_name}' en segundos"
-                f" y las aceleraciones se escalaron a m/s²." + freq_msg
+                f"Datos de motor detectados (tiempos en {units}). Se agregó la columna '{time_col_name}' en segundos,"
+                f" la columna '{ts_col}' se convirtió a segundos y se guardó la serie original en '{raw_col_name}'."
+                " Aceleraciones convertidas a m/s²." + freq_msg
+            ) if units != "s" else (
+                f"Datos de motor detectados. Se agregó la columna '{time_col_name}' en segundos"
+                f" y se normalizó el inicio del tiempo; la columna original '{ts_col}' se conservó en '{raw_col_name}'."
+                " Aceleraciones convertidas a m/s²." + freq_msg
             )
 
             return work_df, message
