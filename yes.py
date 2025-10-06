@@ -1269,6 +1269,35 @@ class MainApp:
         except Exception:
             pass
 
+    def _on_config_tab_change(self, e: ft.ControlEvent):
+        key = None
+        try:
+            tabs_control = e.control
+            selected_index = getattr(tabs_control, "selected_index", 0) or 0
+            keys = getattr(self, "config_tab_keys", []) or []
+            if 0 <= selected_index < len(keys):
+                key = keys[selected_index]
+        except Exception:
+            key = None
+        if not key:
+            return
+        try:
+            new_view = (self.config_tab_views or {}).get(key)
+        except Exception:
+            new_view = None
+        if not new_view:
+            return
+        try:
+            self.active_config_tab = key
+        except Exception:
+            pass
+        try:
+            self.config_tab_body.content = new_view
+            if self.config_tab_body.page:
+                self.config_tab_body.update()
+        except Exception:
+            pass
+
     def _compute_bearing_freqs_click(self, e=None):
         try:
             rpm_val = float(self.rpm_hint_field.value) if getattr(self, "rpm_hint_field", None) and getattr(self.rpm_hint_field, "value", "") else None
@@ -2435,9 +2464,11 @@ class MainApp:
 
             # Espectro de Envolvente (gráfica separada para PDF)
             img_env = None
+            env_visible_peaks: List[Tuple[float, float, float]] = []
             try:
                 xf_env = res.get('envelope', {}).get('f_hz', None)
                 env_amp = res.get('envelope', {}).get('amp', None)
+                peaks_env = res.get('envelope', {}).get('peaks', [])
                 if xf_env is not None and env_amp is not None and len(xf_env) > 0:
                     if hide_lf:
                         m_env = xf_env >= max(0.0, fc)
@@ -2455,10 +2486,11 @@ class MainApp:
                     env_ax.set_xlabel("Frecuencia (Hz)")
                     env_ax.set_ylabel("Amp [a.u.]")
                     try:
-                        vis_peaks = []
+                        vis_peaks: List[Tuple[float, float, float]] = []
                         for p in (peaks_env or []):
                             f0 = float(p.get('f_hz', 0.0))
                             a0 = float(p.get('amp', 0.0))
+                            snr = float(p.get('snr_db', 0.0))
                             if f0 <= 0 or a0 <= 0:
                                 continue
                             if hide_lf and f0 < max(0.0, fc):
@@ -2467,17 +2499,18 @@ class MainApp:
                                 continue
                             if zmin is not None and (f0 < zmin or f0 > zmax):
                                 continue
-                            vis_peaks.append((f0, a0))
+                            vis_peaks.append((f0, a0, snr))
                         if vis_peaks:
                             filtered = vis_peaks
                             if zmin is not None:
-                                tmp = [(f0, a0) for f0, a0 in vis_peaks if zmin <= f0 <= zmax]
+                                tmp = [(f0, a0, snr) for f0, a0, snr in vis_peaks if zmin <= f0 <= zmax]
                                 if tmp:
                                     filtered = tmp
-                            pfx, pfy = zip(*filtered)
-                            env_ax.scatter(pfx, pfy, color="#c0392b", s=20, zorder=5)
-                            peak_points = [(float(f0), float(a0)) for f0, a0 in filtered]
-                            peak_labels = [f"{float(f0):.2f} Hz" for f0, _ in filtered]
+                            env_visible_peaks = [(float(f0), float(a0), float(snr)) for f0, a0, snr in filtered]
+                            pfx, pfy = zip(*[(f0, a0) for f0, a0, _ in env_visible_peaks])
+                            env_ax.scatter(pfx, pfy, color="#c0392b", s=36, zorder=5, edgecolors="white", linewidths=0.6)
+                            peak_points = [(f0, a0) for f0, a0, _ in env_visible_peaks]
+                            peak_labels = [f"{f0:.2f} Hz | {a0:.3f} a.u." for f0, a0, _ in env_visible_peaks]
                             self._place_annotations(env_ax, peak_points, peak_labels, color="#c0392b", text_color="#c0392b")
                     except Exception:
                         pass
@@ -2510,6 +2543,7 @@ class MainApp:
                     img_env = save_plot(env_fig)
             except Exception:
                 img_env = None
+                env_visible_peaks = []
 
             img_runup = None
             try:
@@ -2787,6 +2821,16 @@ class MainApp:
             elements.append(Image(img_fft, width=400, height=150))
             if img_env:
                 elements.append(Image(img_env, width=400, height=150))
+                if env_visible_peaks:
+                    elements.append(Spacer(1, 8))
+                    elements.append(Paragraph("Picos principales (envolvente)", styles['Heading2']))
+                    env_table_data = [["Frecuencia (Hz)", "Amplitud (a.u.)", "SNR (dB)"]]
+                    for f0, a0, snr in env_visible_peaks:
+                        env_table_data.append([f"{f0:.2f}", f"{a0:.3f}", f"{snr:.1f}"])
+                    env_table = Table(env_table_data, colWidths=[120, 140, 120])
+                    _apply_table_style(env_table)
+                    elements.append(env_table)
+                    elements.append(Spacer(1, 12))
             if img_runup:
                 elements.append(Paragraph("Arranque/Paro - Cascada 3D", styles['Heading2']))
                 elements.append(Image(img_runup, width=400, height=180))
@@ -4255,7 +4299,7 @@ class MainApp:
                 ], spacing=10, wrap=True),
                 ft.Row([ft.ElevatedButton("Calcular frecuencias", icon=ft.Icons.FUNCTIONS, on_click=self._compute_bearing_freqs_click)], alignment="start")
             ], spacing=8),
-            visible=False,
+            visible=(self.analysis_mode == "assist"),
         )
 
 
@@ -4491,109 +4535,124 @@ class MainApp:
 
         self.config_expanded = True
 
-        self.config_container = ft.Container(
-
-            content=ft.Column([
-
-                # Fila tiempo y FFT
-
+        general_settings = ft.Column(
+            [
+                ft.Text("Columnas base", size=14, weight="bold"),
                 ft.Row([self.time_dropdown, self.fft_dropdown], spacing=10),
-
-                # Unidad para la señal en tiempo
+                ft.Text("Unidades y colores", size=14, weight="bold"),
                 ft.Row([self.time_unit_dd], spacing=10),
-                ft.Text('Colores de graficas:', size=14),
-
                 ft.Row([self.time_color_dd, self.fft_color_dd], spacing=10),
+            ],
+            spacing=12,
+            tight=True,
+        )
 
-
-
-
-                # Señales
-
-                ft.Text("📊 Señales en tiempo:", size=14),
-
+        signal_settings = ft.Column(
+            [
+                ft.Text("📊 Señales en tiempo", size=14, weight="bold"),
                 ft.Row(self.signal_checkboxes, wrap=True, spacing=10),
                 self.combine_signals_cb,
-
-
-
-
-                # Auxiliares
-
-                ft.Text("📌 Variables auxiliares:", size=14),
-
+                ft.Text("📌 Variables auxiliares", size=14, weight="bold"),
                 ft.Column([
-
                     ft.Row([cb, color_dd, style_dd], spacing=10)
-
                     for cb, color_dd, style_dd in self.aux_controls
+                ], spacing=6),
+            ],
+            spacing=12,
+            tight=True,
+        )
 
-                ], spacing=5),
-
-
-
-                # Periodo
-
-                ft.Text("⏱️ Periodo de análisis:", size=14),
-
+        spectrum_settings = ft.Column(
+            [
+                ft.Text("⏱️ Periodo de análisis", size=14, weight="bold"),
                 ft.Row([self.start_time_field, self.end_time_field], spacing=10),
-
-                # Opciones de espectro (visual)
-                ft.Text("Opciones de espectro (visual):", size=14),
+                ft.Text("Opciones de espectro", size=14, weight="bold"),
                 ft.Row([self.hide_lf_cb, self.lf_cutoff_field, self.hf_limit_field, self.runup_3d_cb], spacing=10, wrap=True),
                 ft.Row([self.orbit_cb, self.orbit_x_dd, self.orbit_y_dd], spacing=10, wrap=True),
                 ft.Column([self.fft_zoom_text, self.fft_zoom_slider], spacing=4),
-                ft.Row([self.db_scale_cb, self.sens_unit_dd, self.sensor_sens_field, self.gain_field], spacing=10),
-                ft.Row([self.db_ref_field, self.db_ymin_field, self.db_ymax_field], spacing=10),
+                ft.Text("Escala y calibración", size=14, weight="bold"),
+                ft.Row([self.db_scale_cb, self.sens_unit_dd, self.sensor_sens_field, self.gain_field], spacing=10, wrap=True),
+                ft.Row([self.db_ref_field, self.db_ymin_field, self.db_ymax_field], spacing=10, wrap=True),
+            ],
+            spacing=12,
+            tight=True,
+        )
 
-                # Parámetros de máquina (opcionales)
-                ft.Text("Parámetros de máquina (opcionales):", size=14),
-                ft.Row([self.analysis_mode_dd, self.rpm_hint_field, self.line_freq_dd, self.gear_teeth_field, ft.OutlinedButton("Rodamientos", icon=ft.Icons.LIST_ALT_ROUNDED, on_click=self._goto_bearings_view)], spacing=10, wrap=True),
+        diagnosis_settings = ft.Column(
+            [
+                ft.Text("Parámetros de máquina", size=14, weight="bold"),
+                ft.Row([
+                    self.analysis_mode_dd,
+                    self.rpm_hint_field,
+                    self.line_freq_dd,
+                    self.gear_teeth_field,
+                    ft.OutlinedButton("Rodamientos", icon=ft.Icons.LIST_ALT_ROUNDED, on_click=self._goto_bearings_view),
+                ], spacing=10, wrap=True),
                 self.assisted_box,
                 ft.Row([self.bpfo_field, self.bpfi_field, self.bsf_field, self.ftf_field], spacing=10, wrap=True),
+            ],
+            spacing=12,
+            tight=True,
+        )
 
+        config_tab_wrappers = {
+            "inputs": ft.Container(content=general_settings, padding=10),
+            "signals": ft.Container(content=signal_settings, padding=10),
+            "spectrum": ft.Container(content=spectrum_settings, padding=10),
+            "diagnostics": ft.Container(content=diagnosis_settings, padding=10),
+        }
 
+        tab_definitions = [
+            ("inputs", "Entradas", ft.Icons.TUNE_ROUNDED),
+            ("signals", "Señales", ft.Icons.SHOW_CHART_ROUNDED),
+            ("spectrum", "Espectro", ft.Icons.GRAPHIC_EQ_ROUNDED),
+            ("diagnostics", "Diagnóstico", ft.Icons.MEDICAL_SERVICES_ROUNDED),
+        ]
 
-                # Botones
+        self.config_tab_views = config_tab_wrappers
+        self.config_tab_keys = [key for key, *_ in tab_definitions]
+        self.active_config_tab = self.config_tab_keys[0]
 
-                ft.Row(
+        self.config_tabs = ft.Tabs(
+            animation_duration=250,
+            selected_index=0,
+            tabs=[ft.Tab(text=label, icon=icon) for key, label, icon in tab_definitions],
+            on_change=self._on_config_tab_change,
+        )
 
-                    alignment="center",
+        self.config_tab_body = ft.Container(
+            content=self.config_tab_views[self.active_config_tab],
+            padding=ft.padding.only(top=6),
+        )
 
-                    spacing=20,
+        action_buttons = ft.Row(
+            alignment="center",
+            spacing=20,
+            controls=[
+                ft.ElevatedButton(
+                    "Generar",
+                    icon=ft.Icons.ANALYTICS_ROUNDED,
+                    on_click=self._update_analysis,
+                    style=ft.ButtonStyle(bgcolor=self._accent_ui(), color="white"),
+                ),
+                ft.OutlinedButton(
+                    "Exportar",
+                    icon=ft.Icons.DOWNLOAD_ROUNDED,
+                    on_click=self.exportar_pdf,
+                ),
+            ],
+        )
 
-                    controls=[
-
-                        ft.ElevatedButton(
-
-                            "Generar",
-
-                            icon=ft.Icons.ANALYTICS_ROUNDED,
-
-                            on_click=self._update_analysis,
-
-                            style=ft.ButtonStyle(bgcolor=self._accent_ui(), color="white")
-
-                        ),
-
-                        ft.OutlinedButton(
-
-                            "Exportar",
-
-                            icon=ft.Icons.DOWNLOAD_ROUNDED,
-
-                            on_click=self.exportar_pdf
-
-                        )
-
-                    ]
-
-                )
-
-            ], spacing=15),
-
-            visible=self.config_expanded
-
+        self.config_container = ft.Container(
+            content=ft.Column(
+                [
+                    self.config_tabs,
+                    self.config_tab_body,
+                    action_buttons,
+                ],
+                spacing=16,
+            ),
+            visible=self.config_expanded,
         )
 
 
