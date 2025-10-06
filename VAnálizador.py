@@ -443,6 +443,81 @@ def anti_alias_and_decimate(time_s: np.ndarray,
 # =========================
 #   Analizador independiente
 # =========================
+def _moving_average_filter(x: np.ndarray, window: float) -> np.ndarray:
+    """Aplicación segura de un filtro promedio móvil de tamaño impar."""
+    arr = np.asarray(x, dtype=float).ravel()
+    if arr.size == 0:
+        return np.asarray([], dtype=float)
+    if arr.size < 3:
+        return arr.copy()
+    try:
+        n = int(round(float(window)))
+    except Exception:
+        n = 0
+    if n < 3:
+        n = 3
+    if n % 2 == 0:
+        n += 1
+    if n >= arr.size:
+        n = arr.size if arr.size % 2 == 1 else arr.size - 1
+        if n < 3:
+            n = 3 if arr.size >= 3 else arr.size
+        if n % 2 == 0 and n > 1:
+            n -= 1
+    if n <= 1:
+        return arr.copy()
+    pad = np.pad(arr, (n // 2, n // 2), mode="edge")
+    kernel = np.ones(int(n), dtype=float) / float(n)
+    return np.convolve(pad, kernel, mode="valid")
+
+
+def _iso_bandpass_filter(acc: np.ndarray, fs: float, f_low: float = 10.0, f_high: float = 1000.0) -> np.ndarray:
+    """Aproxima el filtro ISO 20816 (10–1000 Hz) usando promedios móviles."""
+    arr = np.asarray(acc, dtype=float).ravel()
+    if arr.size == 0 or not np.isfinite(fs) or fs <= 0:
+        return arr.copy()
+    nyquist = 0.5 * float(fs)
+    if nyquist <= 0:
+        return arr.copy()
+    try:
+        flo = float(f_low)
+    except Exception:
+        flo = 10.0
+    try:
+        fhi = float(f_high)
+    except Exception:
+        fhi = 1000.0
+    flo = max(0.1, min(flo, nyquist * 0.999))
+    fhi = max(flo, min(fhi, nyquist * 0.999))
+    hp = arr - _moving_average_filter(arr, fs / flo if flo > 0 else arr.size)
+    hp -= float(np.mean(hp))
+    if fhi >= nyquist * 0.995:
+        return hp
+    lp = _moving_average_filter(hp, fs / fhi if fhi > 0 else arr.size)
+    lp -= float(np.mean(lp))
+    return lp
+
+
+def _velocity_time_from_acc(acc: np.ndarray, dt: float, apply_iso: bool = True, f_low: float = 10.0, f_high: float = 1000.0) -> np.ndarray:
+    """Integra aceleración a velocidad en el tiempo (mm/s)."""
+    acc_arr = np.asarray(acc, dtype=float).ravel()
+    if acc_arr.size < 2 or not np.isfinite(dt) or dt <= 0:
+        return np.asarray([], dtype=float)
+    fs = 1.0 / float(dt)
+    proc = acc_arr - float(np.mean(acc_arr))
+    if apply_iso and fs > 0:
+        proc = _iso_bandpass_filter(proc, fs, f_low=f_low, f_high=f_high)
+    Af = np.fft.rfft(proc)
+    xf = np.fft.rfftfreq(acc_arr.size, dt)
+    V = np.zeros_like(Af, dtype=complex)
+    pos = xf > 0
+    if np.any(pos):
+        V[pos] = Af[pos] / (1j * 2.0 * np.pi * xf[pos])
+    V[0] = 0.0
+    vel_t = np.fft.irfft(V, n=acc_arr.size)
+    return 1000.0 * vel_t
+
+
 def analyze_vibration(
     time_s: np.ndarray,
     acc_ms2: np.ndarray,
@@ -648,6 +723,9 @@ def analyze_vibration(
         trend = np.full_like(a, float(np.mean(a)))
     a_proc = a - trend
     df = fs / len(a) if fs > 0 and len(a) > 0 else 0.0
+    f_high_iso = min(1000.0, 0.48 * fs) if fs > 0 else 1000.0
+    vel_iso_time = _velocity_time_from_acc(a_proc, dt, apply_iso=True, f_low=10.0, f_high=f_high_iso)
+    rms_vel_iso_mm = float(np.sqrt(np.mean(vel_iso_time**2))) if vel_iso_time.size else 0.0
     xf, mag_acc, mag_vel_mm, rms_vel_time_mm = _acc_fft_to_vel_mm_s(a_proc, dt)
     # RMS de aceleración sin DC/tendencia
     rms_time_acc = float(np.sqrt(np.mean(a_proc**2))) if len(a_proc) else 0.0
@@ -667,7 +745,7 @@ def analyze_vibration(
     else:
         dom_freq, dom_amp = 0.0, 0.0
     # Severidad basada en RMS de velocidad temporal (mm/s)
-    rms_vel_spec_mm = rms_vel_time_mm
+    rms_vel_spec_mm = rms_vel_iso_mm if np.isfinite(rms_vel_iso_mm) else rms_vel_time_mm
     f1 = _get_1x(dom_freq, rpm)
     r2x = _amp_near(xf, mag_vel_mm, 2.0 * f1 if f1 > 0 else 0.0, df) / (dom_amp + 1e-12)
     r3x = _amp_near(xf, mag_vel_mm, 3.0 * f1 if f1 > 0 else 0.0, df) / (dom_amp + 1e-12)
@@ -870,7 +948,13 @@ def analyze_vibration(
         },
         "rpm": rpm,
         "f1_hz": f1,
-        "severity": {"label": sev_label, "color": sev_color, "rms_mm_s": rms_vel_spec_mm},
+        "severity": {
+            "label": sev_label,
+            "color": sev_color,
+            "rms_mm_s": rms_vel_spec_mm,
+            "rms_iso_mm_s": rms_vel_spec_mm,
+            "rms_fullband_mm_s": rms_vel_time_mm,
+        },
         "diagnosis": findings,
         "diagnosis_summary": severity_summary,
         "diagnosis_findings": core_findings,
@@ -1041,6 +1125,16 @@ class MainApp:
         self.fft_plot_color = self._get_color_pref("fft_plot_color", self._accent_ui())
         self.combine_signals_enabled = self._get_bool_storage("combine_signals_enabled", False)
         self._last_combined_sources: List[str] = []
+
+        stored_input_unit = self.page.client_storage.get("input_unit_mode")
+        if isinstance(stored_input_unit, str) and stored_input_unit in ("acc_ms2", "acc_g", "counts"):
+            self.input_unit_mode = stored_input_unit
+        else:
+            self.input_unit_mode = "acc_ms2"
+        stored_counts_range = self.page.client_storage.get("input_counts_range")
+        self.input_counts_range = str(stored_counts_range) if stored_counts_range not in (None, "") else "16"
+        stored_counts_fullscale = self.page.client_storage.get("input_counts_fullscale")
+        self.input_counts_fullscale = str(stored_counts_fullscale) if stored_counts_fullscale not in (None, "") else "32768"
 
 
 
@@ -1269,7 +1363,7 @@ class MainApp:
         except Exception:
             pass
 
-    def _on_config_tab_change(self, e: ft.ControlEvent):
+    def _handle_config_tab_change(self, e: ft.ControlEvent):
         key = None
         try:
             tabs_control = e.control
@@ -1297,6 +1391,10 @@ class MainApp:
                 self.config_tab_body.update()
         except Exception:
             pass
+
+    # Compatibilidad hacia atrás: mantener el nombre anterior si otros métodos lo usan
+    def _on_config_tab_change(self, e: ft.ControlEvent):
+        self._handle_config_tab_change(e)
 
     def _compute_bearing_freqs_click(self, e=None):
         try:
@@ -2172,6 +2270,14 @@ class MainApp:
                 start_t, end_t = t[0], t[-1]
             mask = (t >= start_t) & (t <= end_t)
             t_seg, sig_seg = t[mask], signal[mask]
+            try:
+                sig_seg = self._convert_input_signal(sig_seg)
+            except Exception:
+                sig_seg = np.asarray(sig_seg, dtype=float)
+            try:
+                sig_seg = self._convert_input_signal(sig_seg)
+            except Exception:
+                sig_seg = np.asarray(sig_seg, dtype=float)
 
             def compute_fft_dual(y, tv):
                 N = len(y)
@@ -2585,6 +2691,14 @@ class MainApp:
                         except Exception:
                             x_seg_pdf = self.current_df[x_col].to_numpy()
                             y_seg_pdf = self.current_df[y_col].to_numpy()
+                        try:
+                            x_seg_pdf = self._convert_input_signal(x_seg_pdf)
+                        except Exception:
+                            x_seg_pdf = np.asarray(x_seg_pdf, dtype=float)
+                        try:
+                            y_seg_pdf = self._convert_input_signal(y_seg_pdf)
+                        except Exception:
+                            y_seg_pdf = np.asarray(y_seg_pdf, dtype=float)
                         orbit_fig = self._generate_orbit_figure(
                             t_seg,
                             x_seg_pdf,
@@ -4254,6 +4368,34 @@ class MainApp:
             width=220,
         )
 
+        self.input_unit_dd = ft.Dropdown(
+            label="Datos de entrada",
+            options=[
+                ft.dropdown.Option("acc_ms2", "Aceleración (m/s^2)"),
+                ft.dropdown.Option("acc_g", "Aceleración (g)"),
+                ft.dropdown.Option("counts", "Cuentas ADC (±g)"),
+            ],
+            value=getattr(self, "input_unit_mode", "acc_ms2"),
+            width=220,
+        )
+        self.counts_range_field = ft.TextField(
+            label="±g sensor",
+            value=getattr(self, "input_counts_range", "16"),
+            width=110,
+            tooltip="Rango máximo del acelerómetro (por ejemplo 16 para ±16 g)",
+        )
+        self.counts_fullscale_field = ft.TextField(
+            label="Cuentas FS",
+            value=getattr(self, "input_counts_fullscale", "32768"),
+            width=120,
+            tooltip="Valor de fondo de escala del ADC (p.ej. 32768 para 16 bits)",
+        )
+        self.input_unit_dd.on_change = self._on_input_unit_change
+        self.counts_range_field.on_change = self._on_counts_setting_change
+        self.counts_fullscale_field.on_change = self._on_counts_setting_change
+
+
+
         self.rpm_hint_field = ft.TextField(label="RPM (opc.)", value="", width=120)
         self.line_freq_dd = ft.Dropdown(label="Línea", options=[ft.dropdown.Option("50"), ft.dropdown.Option("60")], value="60", width=110)
         self.gear_teeth_field = ft.TextField(label="Dientes engrane (opc.)", value="", width=160)
@@ -4535,12 +4677,15 @@ class MainApp:
 
         self.config_expanded = True
 
+        self._refresh_input_unit_controls()
+
         general_settings = ft.Column(
             [
                 ft.Text("Columnas base", size=14, weight="bold"),
                 ft.Row([self.time_dropdown, self.fft_dropdown], spacing=10),
                 ft.Text("Unidades y colores", size=14, weight="bold"),
                 ft.Row([self.time_unit_dd], spacing=10),
+                ft.Row([self.input_unit_dd, self.counts_range_field, self.counts_fullscale_field], spacing=10, wrap=True),
                 ft.Row([self.time_color_dd, self.fft_color_dd], spacing=10),
             ],
             spacing=12,
@@ -4617,7 +4762,7 @@ class MainApp:
             animation_duration=250,
             selected_index=0,
             tabs=[ft.Tab(text=label, icon=icon) for key, label, icon in tab_definitions],
-            on_change=self._on_config_tab_change,
+            on_change=self._handle_config_tab_change,
         )
 
         self.config_tab_body = ft.Container(
@@ -4808,11 +4953,101 @@ class MainApp:
 
 
 
+    def _refresh_input_unit_controls(self):
+        try:
+            mode = getattr(self.input_unit_dd, 'value', getattr(self, 'input_unit_mode', 'acc_ms2'))
+        except Exception:
+            mode = getattr(self, 'input_unit_mode', 'acc_ms2')
+        disabled = (mode != "counts")
+        try:
+            if getattr(self, 'counts_range_field', None):
+                self.counts_range_field.disabled = disabled
+                if getattr(self.counts_range_field, 'page', None):
+                    self.counts_range_field.update()
+            if getattr(self, 'counts_fullscale_field', None):
+                self.counts_fullscale_field.disabled = disabled
+                if getattr(self.counts_fullscale_field, 'page', None):
+                    self.counts_fullscale_field.update()
+        except Exception:
+            pass
+
+    def _on_input_unit_change(self, e=None):
+        try:
+            mode = getattr(self.input_unit_dd, 'value', 'acc_ms2') or 'acc_ms2'
+        except Exception:
+            mode = 'acc_ms2'
+        self.input_unit_mode = mode
+        try:
+            self.page.client_storage.set("input_unit_mode", mode)
+        except Exception:
+            pass
+        self._refresh_input_unit_controls()
+        self._update_analysis()
+
+    def _on_counts_setting_change(self, e=None):
+        try:
+            rng_val = getattr(self.counts_range_field, 'value', '') or '16'
+        except Exception:
+            rng_val = '16'
+        try:
+            fs_val = getattr(self.counts_fullscale_field, 'value', '') or '32768'
+        except Exception:
+            fs_val = '32768'
+        self.input_counts_range = rng_val
+        self.input_counts_fullscale = fs_val
+        try:
+            self.page.client_storage.set("input_counts_range", rng_val)
+        except Exception:
+            pass
+        try:
+            self.page.client_storage.set("input_counts_fullscale", fs_val)
+        except Exception:
+            pass
+        self._update_analysis()
+
+    def _convert_input_signal(self, signal: np.ndarray) -> np.ndarray:
+        arr = np.asarray(signal, dtype=float)
+        if arr.size == 0:
+            return arr.astype(float)
+        try:
+            mode = getattr(self.input_unit_dd, 'value', None) or getattr(self, 'input_unit_mode', 'acc_ms2')
+        except Exception:
+            mode = getattr(self, 'input_unit_mode', 'acc_ms2')
+        converted = arr.astype(float, copy=True)
+        if mode == "acc_g":
+            converted = converted * 9.80665
+        elif mode == "counts":
+            try:
+                g_range_val = float(getattr(self.counts_range_field, 'value', self.input_counts_range) or self.input_counts_range)
+            except Exception:
+                try:
+                    g_range_val = float(self.input_counts_range)
+                except Exception:
+                    g_range_val = 16.0
+            try:
+                fs_val = float(getattr(self.counts_fullscale_field, 'value', self.input_counts_fullscale) or self.input_counts_fullscale)
+            except Exception:
+                try:
+                    fs_val = float(self.input_counts_fullscale)
+                except Exception:
+                    fs_val = 32768.0
+            if not np.isfinite(g_range_val) or g_range_val <= 0:
+                g_range_val = 16.0
+            if not np.isfinite(fs_val) or fs_val <= 0:
+                fs_val = 32768.0
+            scale = 9.80665 * g_range_val / fs_val
+            converted = converted * scale
+        return converted
+
+
     def _calculate_rms(self, signal):
         """
         Calcula el valor RMS de una señal en el dominio del tiempo.
         """
-        return np.sqrt(np.mean(signal**2))
+        arr = np.asarray(signal, dtype=float)
+        if arr.size == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(arr**2)))
 
     def _format_peak_label(self, freq_hz: float, amp_mm_s: float, order: float | None = None, unit: str = "mm/s") -> str:
         label = f"{freq_hz:.2f} Hz | {amp_mm_s:.3f} {unit}"
@@ -5477,15 +5712,9 @@ class MainApp:
         dt = float(np.median(np.diff(t)))
         if not np.isfinite(dt) or dt <= 0:
             return np.asarray([], dtype=float)
-        N = acc.size
-        Af = np.fft.rfft(acc)
-        xf = np.fft.rfftfreq(N, dt)
-        V = np.zeros_like(Af, dtype=complex)
-        pos = xf > 0
-        V[pos] = Af[pos] / (1j * 2.0 * np.pi * xf[pos])
-        V[0] = 0.0
-        v_t = np.fft.irfft(V, n=N)
-        return 1000.0 * v_t  # mm/s
+        fs = 1.0 / dt if dt > 0 else 0.0
+        f_high_iso = min(1000.0, 0.48 * fs) if fs > 0 else 1000.0
+        return _velocity_time_from_acc(acc, dt, apply_iso=True, f_low=10.0, f_high=f_high_iso)
 
     def _classify_severity(self, rms_value):
         """
@@ -5876,6 +6105,10 @@ class MainApp:
             mask = (t >= start_t) & (t <= end_t)
 
             t_segment, signal_segment = t[mask], signal[mask]
+            try:
+                signal_segment = self._convert_input_signal(signal_segment)
+            except Exception:
+                signal_segment = np.asarray(signal_segment, dtype=float)
 
             if len(signal_segment) < 2:
 
@@ -6358,6 +6591,14 @@ class MainApp:
                         except Exception:
                             x_seg = self.current_df[x_col].to_numpy()
                             y_seg = self.current_df[y_col].to_numpy()
+                        try:
+                            x_seg = self._convert_input_signal(x_seg)
+                        except Exception:
+                            x_seg = np.asarray(x_seg, dtype=float)
+                        try:
+                            y_seg = self._convert_input_signal(y_seg)
+                        except Exception:
+                            y_seg = np.asarray(y_seg, dtype=float)
                         orbit_fig = self._generate_orbit_figure(
                             t_segment,
                             x_seg,
@@ -7968,6 +8209,10 @@ class MainApp:
                 for sig in selected_signals:
 
                     y = self.current_df[sig].to_numpy()
+                    try:
+                        y = self._convert_input_signal(y)
+                    except Exception:
+                        y = np.asarray(y, dtype=float)
 
                     N = len(y)
 
